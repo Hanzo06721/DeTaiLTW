@@ -1,0 +1,1 @@
+Để banner của dự án tại đây (ví dụ: banner-main.jpg). Hiện giao diện dùng khối màu/ô trống để không cần ảnh mẫu sai chủ đề.

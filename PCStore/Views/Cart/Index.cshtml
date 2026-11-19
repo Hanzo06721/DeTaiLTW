@@ -1,0 +1,83 @@
+@using System.Globalization
+@model List<CartSessionItem>
+@{
+    ViewData["Title"] = "Giỏ hàng";
+    var items = Model ?? new List<CartSessionItem>();
+    var vi = CultureInfo.GetCultureInfo("vi-VN");
+    string FormatVnd(decimal amount) => $"{amount.ToString("#,##0", vi)} đ";
+    var totalPrice = items.Sum(i => i.LineTotal);
+    var totalQty = items.Sum(i => i.Quantity);
+}
+
+<div class="container page-section">
+    <div class="breadcrumbs">
+        <a asp-controller="Home" asp-action="Index">Trang chủ</a><span>›</span> Giỏ hàng
+    </div>
+    <div class="page-title-row">
+        <div>
+            <span class="eyebrow">YOUR CART</span>
+            <h1>Giỏ hàng của bạn</h1>
+            <p>Hiển thị sản phẩm trong Session (đã nhận dữ liệu từ Build PC; NV4 sẽ bổ sung chỉnh sửa giỏ &amp; thanh toán).</p>
+        </div>
+        <a class="btn btn-outline" asp-controller="BuildPc" asp-action="Index">← Quay lại Build PC</a>
+    </div>
+
+    @if (TempData["CartNotice"] is string notice)
+    {
+        <div class="builder-alert builder-alert-success" role="status">@notice</div>
+    }
+
+    <div class="two-panel">
+        @if (items.Count == 0)
+        {
+            <div class="panel empty-panel">
+                <div class="empty-symbol">▧</div>
+                <h2>Chưa có sản phẩm trong giỏ hàng</h2>
+                <p>Hãy chọn linh kiện tại trang Build PC hoặc danh sách sản phẩm để thêm vào giỏ.</p>
+                <a class="btn btn-primary" asp-controller="BuildPc" asp-action="Index">Mở trình Build PC ↗</a>
+            </div>
+        }
+        else
+        {
+            <div class="panel">
+                <h2>Danh sách sản phẩm (@totalQty sản phẩm)</h2>
+                <div class="table-wrap">
+                    <table class="admin-table">
+                        <thead>
+                            <tr>
+                                <th>Sản phẩm</th>
+                                <th>Đơn giá</th>
+                                <th>SL</th>
+                                <th>Thành tiền</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var item in items)
+                            {
+                                <tr>
+                                    <td>
+                                        <strong>@item.Name</strong><br />
+                                        <small>SKU: @item.Sku @(item.Source == "BUILD_PC" ? "· Từ Build PC" : "")</small>
+                                    </td>
+                                    <td>@FormatVnd(item.UnitPrice)</td>
+                                    <td>@item.Quantity</td>
+                                    <td><strong>@FormatVnd(item.LineTotal)</strong></td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        }
+
+        <aside class="panel cart-total">
+            <h3>Tóm tắt đơn hàng</h3>
+            <div class="total-line"><span>Số lượng</span><strong>@totalQty</strong></div>
+            <div class="total-line"><span>Tạm tính</span><strong>@FormatVnd(totalPrice)</strong></div>
+            <div class="total-line"><span>Phí vận chuyển</span><strong>—</strong></div>
+            <div class="total-line final"><span>Tổng cộng</span><strong>@FormatVnd(totalPrice)</strong></div>
+            <a class="btn btn-primary full" asp-controller="Checkout" asp-action="Index">Xem trang thanh toán</a>
+            <small>Dữ liệu giỏ hàng lưu trong Session key <code>PCStore.Cart</code> cho NV4 xử lý đặt hàng.</small>
+        </aside>
+    </div>
+</div>

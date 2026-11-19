@@ -1,0 +1,45 @@
+@{
+    var currentController = ViewContext.RouteData.Values["controller"]?.ToString() ?? "";
+    string NavClass(string controller) => string.Equals(currentController, controller, StringComparison.OrdinalIgnoreCase) ? "side-link active" : "side-link";
+}
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>@ViewData["Title"] - PCStore Admin</title>
+    <link rel="stylesheet" asp-append-version="true" href="~/css/site.css" />
+</head>
+<body class="admin-body">
+    <div class="admin-shell">
+        <aside class="admin-sidebar" id="admin-sidebar" aria-label="Danh mục quản trị">
+            <a class="brand admin-brand" asp-area="Admin" asp-controller="Home" asp-action="Index"><span class="brand-symbol">▦</span><span><strong>PC<span>STORE</span></strong><small>ADMIN PORTAL</small></span></a>
+            <div class="sidebar-label">TỔNG QUAN</div>
+            <a class="@NavClass("Home")" asp-area="Admin" asp-controller="Home" asp-action="Index"><span class="side-icon">▤</span> Dashboard</a>
+            <div class="sidebar-label">QUẢN LÝ BÁN HÀNG</div>
+            <a class="@NavClass("Products")" asp-area="Admin" asp-controller="Products" asp-action="Index"><span class="side-icon">▣</span> Sản phẩm</a>
+            <a class="@NavClass("Categories")" asp-area="Admin" asp-controller="Categories" asp-action="Index"><span class="side-icon">◫</span> Danh mục</a>
+            <a class="@NavClass("Attributes")" asp-area="Admin" asp-controller="Attributes" asp-action="Index"><span class="side-icon">≡</span> Thông số linh kiện</a>
+            <a class="@NavClass("Orders")" asp-area="Admin" asp-controller="Orders" asp-action="Index"><span class="side-icon">▤</span> Đơn hàng</a>
+            <div class="sidebar-label">KHO &amp; TÀI KHOẢN</div>
+            <a class="@NavClass("Imports")" asp-area="Admin" asp-controller="Imports" asp-action="Index"><span class="side-icon">↧</span> Nhập hàng / Kho</a>
+            <a class="@NavClass("Suppliers")" asp-area="Admin" asp-controller="Suppliers" asp-action="Index"><span class="side-icon">▦</span> Nhà cung cấp</a>
+            <a class="@NavClass("Users")" asp-area="Admin" asp-controller="Users" asp-action="Index"><span class="side-icon">♙</span> Người dùng</a>
+            <a class="@NavClass("Reports")" asp-area="Admin" asp-controller="Reports" asp-action="Index"><span class="side-icon">▥</span> Báo cáo</a>
+            <div class="side-grow"></div>
+            <div class="sidebar-footer"><span class="online-dot"></span> Bản khung · Chưa đăng nhập thật</div>
+        </aside>
+        <div class="admin-main-col">
+            <header class="admin-topbar">
+                <div class="admin-top-left"><button class="admin-menu-toggle" aria-label="Đóng mở menu quản trị" data-admin-toggle aria-expanded="false" aria-controls="admin-sidebar">☰</button><span class="admin-breadcrumb">PCStore <span class="sep">/</span> <strong>@ViewData["Title"]</strong></span></div>
+                <div class="admin-top-right"><a class="admin-preview-link" asp-area="" asp-controller="Home" asp-action="Index">↗ Xem website</a><span class="avatar-initial">AD</span></div>
+            </header>
+            <main class="admin-content">@RenderBody()</main>
+            <footer class="admin-footer">PCStore · Giao diện quản trị mẫu · ASP.NET Core MVC</footer>
+        </div>
+    </div>
+    <div class="admin-overlay" data-admin-overlay></div>
+    <script asp-append-version="true" src="~/js/site.js"></script>
+    @await RenderSectionAsync("Scripts", required: false)
+</body>
+</html>

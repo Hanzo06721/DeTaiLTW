@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#02a4ef" />
+    <meta name="description" content="PC Store - Khung giao diện website bán PC, linh kiện và Build PC." />
+    <title>@ViewData["Title"] - PCStore</title>
+    <link rel="stylesheet" asp-append-version="true" href="~/css/site.css" />
+</head>
+<body>
+    <div class="top-strip">
+        <div class="container top-strip-inner"><span>✧ Giao diện minh họa cho đồ án ASP.NET Core MVC</span><span class="top-strip-right">Hỗ trợ khách hàng <strong>·</strong> PC &amp; Linh kiện máy tính</span></div>
+    </div>
+    <header class="store-header">
+        <div class="container header-main">
+            <a class="brand" asp-area="" asp-controller="Home" asp-action="Index" aria-label="PC Store trang chủ"><span class="brand-symbol">▦</span><span><strong>PC<span>STORE</span></strong><small>BUILD YOUR SETUP</small></span></a>
+            <form class="header-search" asp-area="" asp-controller="Products" asp-action="Index" method="get">
+                <span class="search-icon" aria-hidden="true">⌕</span>
+                <input type="search" name="q" placeholder="Tìm PC Gaming, CPU, VGA, RAM, SSD..." aria-label="Tìm sản phẩm (giao diện mẫu)" />
+                <button type="submit" title="Đi tới danh sách sản phẩm">Tìm kiếm</button>
+            </form>
+            <div class="header-actions">
+                <a class="icon-action" asp-area="" asp-controller="Account" asp-action="Login"><span class="action-glyph">♙</span><span>Tài khoản</span></a>
+                <a class="icon-action cart-action" asp-area="" asp-controller="Cart" asp-action="Index"><span class="action-glyph">▧</span><span>Giỏ hàng</span><span class="cart-bubble">@CartSessionHelper.GetTotalQuantity(Context.Session)</span></a>
+                <button class="mobile-menu-toggle" type="button" data-menu-toggle aria-expanded="false" aria-controls="primary-nav" aria-label="Mở menu">☰</button>
+            </div>
+        </div>
+        <nav class="primary-nav" id="primary-nav" aria-label="Điều hướng chính">
+            <div class="container nav-links">
+                <a asp-area="" asp-controller="Home" asp-action="Index">Trang chủ</a>
+                <a asp-area="" asp-controller="Products" asp-action="Index">PC ráp sẵn</a>
+                <a asp-area="" asp-controller="Products" asp-action="Index">Linh kiện máy tính</a>
+                <a class="nav-highlight" asp-area="" asp-controller="BuildPc" asp-action="Index">✦ Build PC theo yêu cầu</a>
+                <a asp-area="" asp-controller="Orders" asp-action="History">Tra cứu đơn hàng</a>
+                <a class="nav-admin" asp-area="Admin" asp-controller="Home" asp-action="Index">Trang quản trị <span>↗</span></a>
+            </div>
+        </nav>
+    </header>
+    <main id="main" class="store-main">@RenderBody()</main>
+    <footer class="site-footer">
+        <div class="container footer-grid">
+            <div><a class="brand brand-footer" asp-area="" asp-controller="Home" asp-action="Index"><span class="brand-symbol">▦</span><span><strong>PC<span>STORE</span></strong><small>BUILD YOUR SETUP</small></span></a><p>Đồ án website bán PC và linh kiện máy tính, được dựng bằng ASP.NET Core MVC (.NET 8).</p></div>
+            <div><h4>Danh mục</h4><a asp-area="" asp-controller="Products" asp-action="Index">PC ráp sẵn</a><a asp-area="" asp-controller="Products" asp-action="Index">Linh kiện máy tính</a><a asp-area="" asp-controller="BuildPc" asp-action="Index">Build PC</a></div>
+            <div><h4>Hỗ trợ</h4><a asp-area="" asp-controller="Account" asp-action="Profile">Thông tin tài khoản</a><a asp-area="" asp-controller="Orders" asp-action="History">Lịch sử đơn hàng</a><a asp-area="Admin" asp-controller="Home" asp-action="Index">Quản trị hệ thống</a></div>
+            <div><h4>Thông tin dự án</h4><p>Phần giao diện và Model đang ở giai đoạn khung. Chưa thực hiện thanh toán hoặc thao tác dữ liệu SQL.</p><div class="footer-pill">UI FRAMEWORK DEMO</div></div>
+        </div>
+        <div class="container footer-bottom"><span>© 2026 PCStore · MVC interface scaffold</span><span>Màu chủ đạo #02A4EF</span></div>
+    </footer>
+    <script asp-append-version="true" src="~/js/site.js"></script>
+    @await RenderSectionAsync("Scripts", required: false)
+</body>
+</html>

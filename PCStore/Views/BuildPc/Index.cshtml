@@ -1,0 +1,60 @@
+@model BuildPcPageViewModel
+@{
+    ViewData["Title"] = "Xây dựng cấu hình PC";
+}
+
+<div class="container page-section">
+    <div class="breadcrumbs">
+        <a asp-controller="Home" asp-action="Index">Trang chủ</a>
+        <span>›</span>
+        <span>Build PC</span>
+    </div>
+
+    <div id="buildPcWorkspace">
+        <partial name="_BuildPcWorkspace" model="Model" />
+    </div>
+</div>
+
+<!-- Modal chọn linh kiện -->
+<div class="picker-backdrop" id="buildPcModal" aria-hidden="true">
+    <div class="picker-dialog" role="dialog" aria-modal="true" aria-labelledby="pickerModalTitle">
+        <div class="picker-header">
+            <div>
+                <span class="eyebrow">CHỌN LINH KIỆN CÒN HÀNG</span>
+                <h2 id="pickerModalTitle">Chọn linh kiện</h2>
+                <p id="pickerModalSubtitle"></p>
+            </div>
+            <button type="button" class="picker-close" data-close-picker aria-label="Đóng hộp chọn">✕</button>
+        </div>
+
+        <div class="picker-toolbar">
+            <div class="picker-search">
+                <span aria-hidden="true">⌕</span>
+                <input type="search" id="pickerSearchInput" placeholder="Tìm theo tên sản phẩm, mã SKU, thông số (LGA1700, DDR5, 750W...)" />
+            </div>
+            <label class="picker-compat-filter">
+                <input type="checkbox" id="pickerCompatOnly" />
+                <span>Ẩn linh kiện không tương thích</span>
+            </label>
+        </div>
+
+        <div class="picker-meta-bar">
+            <span id="pickerResultCount">Đang tải...</span>
+        </div>
+
+        <div class="picker-body" id="pickerList">
+            <div class="picker-empty">Đang tải danh sách sản phẩm...</div>
+        </div>
+    </div>
+</div>
+
+<form id="pickerSelectForm" asp-controller="BuildPc" asp-action="Select" method="post" style="display:none;">
+    @Html.AntiForgeryToken()
+    <input type="hidden" name="slotKey" id="pickerFormSlotKey" />
+    <input type="hidden" name="productId" id="pickerFormProductId" />
+    <input type="hidden" name="quantity" value="1" />
+</form>
+
+@section Scripts {
+    <script asp-append-version="true" src="~/js/build-pc.js"></script>
+}

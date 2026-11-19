@@ -1,0 +1,37 @@
+@{ ViewData["Title"] = "Trang chủ"; }
+<section class="hero-section container">
+    <div class="hero-main">
+        <div class="hero-text"><span class="eyebrow bright">NỀN TẢNG PC &amp; LINH KIỆN</span><h1>Kiến tạo bộ PC<br /><em>đúng chất của bạn.</em></h1><p>Chọn linh kiện theo nhu cầu, tùy chỉnh cấu hình và khám phá thế giới PC với giao diện hiện đại.</p>
+            <div class="hero-buttons"><a class="btn btn-orange" asp-controller="BuildPc" asp-action="Index">Bắt đầu Build PC <span>↗</span></a><a class="btn btn-white-ghost" asp-controller="Products" asp-action="Index">Khám phá sản phẩm</a></div>
+            <div class="hero-highlights"><span>✳ Cấu hình tùy chọn</span><span>✳ Linh kiện đa dạng</span><span>✳ Báo giá nhanh</span></div>
+        </div>
+        <div class="hero-design" aria-hidden="true"><div class="hero-grid"></div><div class="hero-ring ring-one"></div><div class="hero-ring ring-two"></div><div class="hero-computer"><span class="display-glow">PC<br /><strong>SETUP</strong></span></div><div class="computer-stand"></div><div class="hero-chip chip-one">CPU</div><div class="hero-chip chip-two">GPU</div></div>
+        <div class="hero-index">01 <span>/ 03</span></div>
+    </div>
+    <div class="hero-side">
+        <a class="mini-banner gradient-royal" asp-controller="Products" asp-action="Index"><span class="eyebrow">BANNER PHỤ 01</span><strong>PC Gaming<br />Sẵn sàng chiến game</strong><span class="banner-more">Xem danh mục ↗</span><span class="banner-decoration">⌁</span></a>
+        <a class="mini-banner gradient-mint" asp-controller="BuildPc" asp-action="Index"><span class="eyebrow">BANNER PHỤ 02</span><strong>Build PC<br />Theo phong cách riêng</strong><span class="banner-more">Xem cấu hình ↗</span><span class="banner-decoration">◈</span></a>
+    </div>
+</section>
+<div class="container"><div class="feature-bar"><div><span class="feature-icon">✓</span><span><strong>Chất lượng</strong><small>Chọn linh kiện theo nhu cầu</small></span></div><div><span class="feature-icon">✧</span><span><strong>Cấu hình</strong><small>Lắp ráp linh hoạt</small></span></div><div><span class="feature-icon">▣</span><span><strong>Danh mục</strong><small>PC và linh kiện đa dạng</small></span></div><div><span class="feature-icon">↗</span><span><strong>Hỗ trợ</strong><small>Quản lý đơn hàng tiện lợi</small></span></div></div></div>
+<section class="container section-gap">
+    <div class="section-heading"><div><span class="eyebrow">DANH MỤC NỔI BẬT</span><h2>Khám phá theo nhu cầu</h2><p>Lối đi nhanh đến các nhóm PC và linh kiện chính.</p></div><a class="text-link" asp-controller="Products" asp-action="Index">Tất cả danh mục <span>↗</span></a></div>
+    <div class="category-grid">
+        <a class="category-item category-large" asp-controller="Products" asp-action="Index"><span class="category-symbol">▣</span><strong>PC Gaming</strong><small>Máy bộ ráp sẵn</small><span class="category-arrow">↗</span></a>
+        <a class="category-item" asp-controller="Products" asp-action="Index"><span class="category-symbol">◈</span><strong>CPU</strong><small>Bộ vi xử lý</small><span class="category-arrow">↗</span></a>
+        <a class="category-item" asp-controller="Products" asp-action="Index"><span class="category-symbol">▥</span><strong>VGA</strong><small>Card đồ họa</small><span class="category-arrow">↗</span></a>
+        <a class="category-item" asp-controller="Products" asp-action="Index"><span class="category-symbol">◫</span><strong>Mainboard</strong><small>Bo mạch chủ</small><span class="category-arrow">↗</span></a>
+        <a class="category-item" asp-controller="Products" asp-action="Index"><span class="category-symbol">≡</span><strong>RAM</strong><small>Bộ nhớ máy tính</small><span class="category-arrow">↗</span></a>
+        <a class="category-item" asp-controller="Products" asp-action="Index"><span class="category-symbol">▤</span><strong>SSD</strong><small>Lưu trữ tốc độ cao</small><span class="category-arrow">↗</span></a>
+    </div>
+</section>
+<section class="product-showcase"><div class="container section-gap compact-top">
+    <div class="section-heading"><div><span class="eyebrow">GIAO DIỆN SẢN PHẨM</span><h2>PC &amp; linh kiện nổi bật</h2><p>Ô ảnh và giá được để trống, sẵn sàng hiển thị dữ liệu từ SQL Server.</p></div><a class="text-link" asp-controller="Products" asp-action="Index">Xem danh sách <span>↗</span></a></div>
+    <div class="product-grid">
+    @foreach (var item in new[] { ("PC RÁP SẴN", "PC Gaming - Mẫu 01"), ("LINH KIỆN", "CPU - Mẫu 02"), ("LINH KIỆN", "VGA - Mẫu 03"), ("PC RÁP SẴN", "PC Văn phòng - Mẫu 04") })
+    {
+        <article class="product-card"><a class="product-image" asp-controller="Products" asp-action="Details"><span class="picture-placeholder"><span>▧</span><small>Ảnh sản phẩm</small></span></a><div class="product-info"><span class="type-tag">@item.Item1</span><h3>@item.Item2</h3><p class="product-muted">Cấu hình / mô tả đang cập nhật</p><div class="product-bottom"><strong>Liên hệ</strong><a class="square-link" asp-controller="Products" asp-action="Details" aria-label="Xem chi tiết sản phẩm">↗</a></div></div></article>
+    }
+    </div>
+</div></section>
+<section class="container cta-section"><div><span class="eyebrow bright">BUILD YOUR DREAM PC</span><h2>Đã sẵn sàng lắp bộ PC<br />của riêng mình?</h2><p>Bắt đầu từ CPU, bo mạch chủ, RAM và card đồ họa. Tự chọn cấu hình, kiểm tra tương thích và xuất báo giá ngay.</p><a class="btn btn-white" asp-controller="BuildPc" asp-action="Index">Mở trình Build PC <span>↗</span></a></div><div class="cta-art" aria-hidden="true"><span>PC</span><div class="cta-art-mini">CUSTOM BUILD</div></div></section>

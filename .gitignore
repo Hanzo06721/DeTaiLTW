@@ -1,0 +1,22 @@
+## Build and Release Folders
+bin/
+obj/
+[Bb]in/
+[Oo]bj/
+out/
+
+## Visual Studio
+.vs/
+*.user
+*.suo
+*.userprefs
+
+## Visual Studio Code
+.vscode/
+
+## JetBrains Rider
+.idea/
+
+## OS generated files
+.DS_Store
+Thumbs.db

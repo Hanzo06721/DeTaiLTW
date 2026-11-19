@@ -1,0 +1,280 @@
+@using System.Globalization
+@model BuildPcPageViewModel
+@{
+    var vi = CultureInfo.GetCultureInfo("vi-VN");
+    string FormatVnd(decimal amount) => $"{amount.ToString("#,##0", vi)} đ";
+
+    var compat = Model.Compatibility;
+    var statusText = compat.SummaryStatus(Model.SelectedCount, Model.CoreSelectedCount, Model.CoreTotalSlots);
+    var statusClass = !Model.HasItems
+        ? "neutral"
+        : !compat.IsCompatible
+            ? "error"
+            : compat.HasWarnings
+                ? "warning"
+                : "ok";
+
+    var okMsg = ViewData["BuildPcSuccess"] as string ?? TempData["BuildPcSuccess"] as string;
+    var errMsg = ViewData["BuildPcError"] as string ?? TempData["BuildPcError"] as string;
+}
+
+<div class="page-title-row">
+    <div>
+        <span class="eyebrow">PC CONFIGURATOR</span>
+        <h1>Tự xây dựng cấu hình PC</h1>
+        <p>Chọn linh kiện còn hàng từ kho, tự động kiểm tra tương thích và xuất báo giá PDF / Excel.</p>
+    </div>
+    <div class="builder-top-actions">
+        <span class="soft-label">Đã chọn @Model.SelectedCount / @Model.TotalSlots nhóm</span>
+        @if (Model.HasItems)
+        {
+            <form asp-controller="BuildPc" asp-action="Clear" method="post" data-ajax-form data-confirm="Bạn có chắc muốn xóa toàn bộ cấu hình hiện tại?">
+                @Html.AntiForgeryToken()
+                <button type="submit" class="btn btn-danger-outline">Xóa cấu hình</button>
+            </form>
+        }
+    </div>
+</div>
+
+@if (!string.IsNullOrWhiteSpace(okMsg))
+{
+    <div class="builder-alert builder-alert-success" role="status">@okMsg</div>
+}
+@if (!string.IsNullOrWhiteSpace(errMsg))
+{
+    <div class="builder-alert builder-alert-error" role="alert">@errMsg</div>
+}
+
+<div class="builder-layout">
+    <div class="builder-table">
+        <div class="builder-table-head">
+            <div>
+                <h2>Danh sách linh kiện</h2>
+                <small>6 nhóm chính: CPU, Mainboard, RAM, VGA, SSD, PSU (+ Case &amp; Tản nhiệt tùy chọn)</small>
+            </div>
+            <span>@Model.CoreSelectedCount / @Model.CoreTotalSlots linh kiện chính</span>
+        </div>
+
+        @foreach (var row in Model.Rows)
+        {
+            var slot = row.Slot;
+            var product = row.SelectedProduct;
+            <div class="builder-row @(product is not null ? "is-selected" : "")">
+                <div class="builder-number">@slot.Number</div>
+                <div class="builder-slot-icon">@slot.Icon</div>
+
+                <div class="builder-slot">
+                    <strong>
+                        @slot.Title
+                        @if (slot.IsCore)
+                        {
+                            <span class="slot-core-dot" title="Linh kiện chính">*</span>
+                        }
+                    </strong>
+                    <small>@slot.Subtitle</small>
+                    <small class="slot-stock-count">@row.AvailableProductsCount SP sẵn hàng</small>
+                </div>
+
+                @if (product is null)
+                {
+                    <div class="builder-placeholder">
+                        Chưa chọn linh kiện
+                        @if (row.AvailableProductsCount == 0)
+                        {
+                            <span class="slot-empty-hint"> · Chưa có sản phẩm còn hàng trong nhóm này</span>
+                        }
+                    </div>
+                    <div class="builder-row-actions">
+                        <button type="button"
+                                class="btn btn-select"
+                                data-open-picker
+                                data-slot-key="@slot.Key"
+                                data-slot-title="@slot.Title"
+                                data-slot-subtitle="@slot.Subtitle">
+                            + Chọn
+                        </button>
+                    </div>
+                }
+                else
+                {
+                    var maxQty = Math.Max(1, Math.Min(product.StockQuantity, slot.MaxQuantity));
+                    <div class="builder-selected-item">
+                        <div class="builder-thumb">
+                            @if (!string.IsNullOrWhiteSpace(product.Thumbnail))
+                            {
+                                <img src="@product.Thumbnail" alt="@product.Name" onerror="this.style.display='none';this.nextElementSibling.style.display='grid';" />
+                                <span class="builder-thumb-fallback" style="display:none;">@slot.Icon</span>
+                            }
+                            else
+                            {
+                                <span class="builder-thumb-fallback">@slot.Icon</span>
+                            }
+                        </div>
+                        <div class="builder-item-meta">
+                            <div class="builder-item-title">@product.Name</div>
+                            <div class="builder-item-sub">
+                                <span>SKU: <strong>@product.Sku</strong></span>
+                                <span>·</span>
+                                <span>Đơn giá: <strong>@FormatVnd(product.Price)</strong></span>
+                                <span>·</span>
+                                <span>Kho: <strong>@product.StockQuantity</strong></span>
+                            </div>
+                            @if (product.Attributes.Count > 0)
+                            {
+                                <div class="builder-spec-pills">
+                                    @foreach (var attr in product.Attributes.Take(5))
+                                    {
+                                        <span class="spec-pill">@attr.Name: <strong>@attr.Value</strong></span>
+                                    }
+                                </div>
+                            }
+                            @if (!string.IsNullOrWhiteSpace(row.StockNote))
+                            {
+                                <div class="builder-stock-warning">⚠ @row.StockNote</div>
+                            }
+                        </div>
+                    </div>
+
+                    <div class="builder-qty-price">
+                        <form asp-controller="BuildPc" asp-action="UpdateQuantity" method="post" class="qty-form" data-ajax-form>
+                            @Html.AntiForgeryToken()
+                            <input type="hidden" name="slotKey" value="@slot.Key" />
+                            <button type="submit" name="quantity" value="@(row.Quantity - 1)" class="qty-btn" title="Giảm số lượng" @(row.Quantity <= 1 ? "disabled" : null)>−</button>
+                            <input type="number"
+                                   class="qty-input"
+                                   value="@row.Quantity"
+                                   min="1"
+                                   max="@maxQty"
+                                   aria-label="Số lượng @slot.Title"
+                                   data-qty-input
+                                   @(maxQty <= 1 ? "readonly" : null) />
+                            <button type="submit" name="quantity" value="@(row.Quantity + 1)" class="qty-btn" title="Tăng số lượng" @(row.Quantity >= maxQty ? "disabled" : null)>+</button>
+                        </form>
+                        <div class="builder-line-total">@FormatVnd(row.LineTotal)</div>
+                    </div>
+
+                    <div class="builder-row-actions">
+                        <button type="button"
+                                class="btn btn-select"
+                                data-open-picker
+                                data-slot-key="@slot.Key"
+                                data-slot-title="@slot.Title"
+                                data-slot-subtitle="@slot.Subtitle">
+                            Đổi
+                        </button>
+                        <form asp-controller="BuildPc" asp-action="Remove" method="post" data-ajax-form>
+                            @Html.AntiForgeryToken()
+                            <input type="hidden" name="slotKey" value="@slot.Key" />
+                            <button type="submit" class="btn btn-remove" title="Xóa khỏi cấu hình">Xóa</button>
+                        </form>
+                    </div>
+                }
+            </div>
+        }
+    </div>
+
+    <aside class="builder-aside">
+        <div class="builder-status status-@statusClass">
+            <div class="compat-head">
+                <span class="eyebrow">TRẠNG THÁI TƯƠNG THÍCH</span>
+                <span class="compat-badge badge-@statusClass">@statusText</span>
+            </div>
+
+            <div class="progress-track">
+                <div style="width:@(Model.CompletionPercent)%"></div>
+            </div>
+            <small>@Model.CompletionPercent% linh kiện chính (@Model.CoreSelectedCount / @Model.CoreTotalSlots)</small>
+
+            @if (compat.EstimatedWattage.HasValue || compat.RecommendedPsuWattage.HasValue || compat.SelectedPsuWattage.HasValue)
+            {
+                <div class="wattage-box">
+                    @if (compat.EstimatedWattage.HasValue)
+                    {
+                        <div><span>Công suất ước tính</span><strong>~@compat.EstimatedWattage W</strong></div>
+                    }
+                    @if (compat.RecommendedPsuWattage.HasValue)
+                    {
+                        <div><span>PSU khuyến nghị</span><strong>≥ @compat.RecommendedPsuWattage W</strong></div>
+                    }
+                    @if (compat.SelectedPsuWattage.HasValue)
+                    {
+                        <div><span>Nguồn đã chọn</span><strong>@compat.SelectedPsuWattage W</strong></div>
+                    }
+                </div>
+            }
+
+            @if (compat.Issues.Count > 0)
+            {
+                <ul class="compat-list">
+                    @foreach (var issue in compat.Issues)
+                    {
+                        var cls = issue.Severity switch
+                        {
+                            CompatibilitySeverity.Error => "is-error",
+                            CompatibilitySeverity.Warning => "is-warning",
+                            CompatibilitySeverity.Ok => "is-ok",
+                            _ => "is-info"
+                        };
+                        var icon = issue.Severity switch
+                        {
+                            CompatibilitySeverity.Error => "✕",
+                            CompatibilitySeverity.Warning => "!",
+                            CompatibilitySeverity.Ok => "✓",
+                            _ => "ⓘ"
+                        };
+                        <li class="compat-item @cls">
+                            <span class="compat-icon">@icon</span>
+                            <div>
+                                <strong>@issue.Title</strong>
+                                <p>@issue.Message</p>
+                            </div>
+                        </li>
+                    }
+                </ul>
+            }
+            else
+            {
+                <p class="compat-empty">Chọn CPU, Mainboard, RAM, VGA và PSU để hệ thống tự động đối chiếu Socket, chuẩn RAM và công suất nguồn.</p>
+            }
+        </div>
+
+        <div class="builder-total">
+            <span>Tổng giá trị cấu hình</span>
+            <strong>@FormatVnd(Model.TotalPrice)</strong>
+            <small>@Model.TotalItemsQuantity sản phẩm trong cấu hình · Lưu tự động bằng Session</small>
+
+            <form asp-controller="BuildPc" asp-action="AddToCart" method="post">
+                @Html.AntiForgeryToken()
+                <button type="submit" class="btn btn-orange full" @(!Model.HasItems ? "disabled" : null)>
+                    Thêm cấu hình vào giỏ hàng
+                </button>
+            </form>
+
+            @if (Model.HasItems && !compat.IsCompatible)
+            {
+                <p class="compat-cart-warn">⚠ Cấu hình đang có lỗi tương thích. Bạn nên kiểm tra lại trước khi đặt hàng.</p>
+            }
+
+            <div class="export-buttons">
+                @if (Model.HasItems)
+                {
+                    <a class="btn btn-primary" asp-controller="BuildPc" asp-action="ExportPdf">Xuất PDF</a>
+                    <a class="btn btn-outline" asp-controller="BuildPc" asp-action="ExportExcel">Xuất Excel</a>
+                }
+                else
+                {
+                    <button type="button" class="btn btn-primary" disabled>Xuất PDF</button>
+                    <button type="button" class="btn btn-outline" disabled>Xuất Excel</button>
+                }
+            </div>
+
+            @if (Model.HasItems)
+            {
+                <form asp-controller="BuildPc" asp-action="Clear" method="post" data-ajax-form data-confirm="Xóa toàn bộ linh kiện đã chọn?">
+                    @Html.AntiForgeryToken()
+                    <button type="submit" class="btn btn-danger-outline full">Xóa cấu hình</button>
+                </form>
+            }
+        </div>
+    </aside>
+</div>

@@ -1,0 +1,9 @@
+@{ ViewData["Title"] = "Xây dựng cấu hình PC"; }
+<div class="container page-section"><div class="breadcrumbs"><a asp-controller="Home" asp-action="Index">Trang chủ</a><span>›</span> Build PC</div>
+<div class="page-title-row"><div><span class="eyebrow">PC CONFIGURATOR</span><h1>Tự xây dựng cấu hình PC</h1><p>Chọn từng linh kiện để tạo bộ máy phù hợp với nhu cầu của bạn.</p></div><span class="soft-label">Khung giao diện NV3</span></div>
+<div class="builder-layout"><div class="builder-table"><div class="builder-table-head"><h2>Danh sách linh kiện</h2><span>0 / 8 linh kiện được chọn</span></div>
+@foreach (var slot in new[] { ("01","CPU","Bộ vi xử lý"),("02","Mainboard","Bo mạch chủ"),("03","RAM","Bộ nhớ"),("04","VGA","Card đồ họa"),("05","SSD / HDD","Ổ lưu trữ"),("06","PSU","Bộ nguồn"),("07","Case","Vỏ máy"),("08","Tản nhiệt","Hệ thống làm mát") })
+{
+ <div class="builder-row"><div class="builder-number">@slot.Item1</div><div class="builder-slot-icon">◈</div><div class="builder-slot"><strong>@slot.Item2</strong><small>@slot.Item3</small></div><div class="builder-placeholder">Chưa chọn linh kiện</div><button class="btn btn-select" disabled>+ Chọn</button></div>
+}
+</div><aside class="builder-aside"><div class="builder-status"><span class="eyebrow">TRẠNG THÁI CẤU HÌNH</span><h3>Chưa đủ linh kiện</h3><p>Kiểm tra tương thích socket, RAM và công suất nguồn sẽ được xây dựng ở phần nghiệp vụ.</p><div class="progress-track"><div></div></div><small>0% cấu hình hoàn thành</small></div><div class="builder-total"><span>Tổng giá trị cấu hình</span><strong>0 đ</strong><small>Giá cập nhật khi chọn linh kiện</small><button class="btn btn-primary full" disabled>Thêm cấu hình vào giỏ hàng</button><button class="btn btn-outline full" disabled>Xuất báo giá PDF</button></div><div class="builder-help"><strong>NV3 sẽ triển khai</strong><p>Danh sách linh kiện · Kiểm tra tương thích · Tính tổng · Lưu tạm · Xuất báo giá.</p></div></aside></div></div>

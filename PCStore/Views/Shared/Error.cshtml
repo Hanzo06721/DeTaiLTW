@@ -1,0 +1,13 @@
+@model ErrorViewModel
+@{ ViewData["Title"] = "Có lỗi xảy ra"; }
+<section class="container section-gap">
+    <div class="empty-panel">
+        <h1>Không thể hiển thị trang</h1>
+        <p>Vui lòng tải lại hoặc quay về trang chủ.</p>
+        @if (Model?.ShowRequestId == true)
+        {
+            <p class="form-note">Mã yêu cầu: <code>@Model.RequestId</code></p>
+        }
+        <a class="btn btn-primary" asp-area="" asp-controller="Home" asp-action="Index">Về trang chủ</a>
+    </div>
+</section>

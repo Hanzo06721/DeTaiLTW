@@ -1,0 +1,10 @@
+@{ ViewData["Title"] = "PC và linh kiện"; }
+<div class="container page-section"><div class="breadcrumbs"><a asp-controller="Home" asp-action="Index">Trang chủ</a> <span>›</span> PC &amp; Linh kiện</div>
+<div class="page-title-row"><div><span class="eyebrow">PRODUCT CATALOG</span><h1>PC &amp; Linh kiện máy tính</h1><p>Khung danh sách sản phẩm, bộ lọc và vị trí hình ảnh.</p></div><span class="soft-label">Đang chờ dữ liệu SQL</span></div>
+<div class="catalog-layout"><aside class="filter-panel"><div class="filter-title">Bộ lọc sản phẩm <span>☷</span></div><div class="filter-group"><strong>Danh mục</strong><label><input type="checkbox" disabled /> PC ráp sẵn</label><label><input type="checkbox" disabled /> CPU</label><label><input type="checkbox" disabled /> VGA</label><label><input type="checkbox" disabled /> RAM / SSD</label></div><div class="filter-group"><strong>Mức giá</strong><div class="ghost-line"></div><div class="ghost-line short"></div><small>Kết nối bộ lọc sau khi có SQL</small></div><div class="filter-group"><strong>Thương hiệu</strong><div class="ghost-line"></div><div class="ghost-line short"></div></div></aside>
+<div class="catalog-results"><div class="catalog-toolbar"><span>Hiển thị bố cục sản phẩm (dữ liệu mẫu)</span><select aria-label="Sắp xếp mẫu" disabled><option>Sắp xếp mặc định</option></select></div><div class="product-grid catalog-grid">
+@for (var i = 1; i <= 8; i++)
+{
+ <article class="product-card"><a class="product-image" asp-controller="Products" asp-action="Details"><span class="picture-placeholder"><span>▧</span><small>Ảnh sản phẩm</small></span></a><div class="product-info"><span class="type-tag">SẢN PHẨM MẪU</span><h3>Sản phẩm chờ cập nhật @i.ToString("00")</h3><p class="product-muted">Thông số kỹ thuật chưa có dữ liệu</p><div class="product-bottom"><strong>— đ</strong><a class="square-link" asp-controller="Products" asp-action="Details" aria-label="Chi tiết sản phẩm">↗</a></div></div></article>
+}
+</div></div></div></div>
