@@ -1,352 +1,2025 @@
-/*
-    DATABASE: computer_store_db
-    HE QUAN TRI: Microsoft SQL Server (T-SQL)
-    DU AN: ASP.NET Core Web App (Model-View-Controller)
-
-    Chuyen doi tu file MySQL computer_store_db.sql do nhom cung cap.
-    - Giu nguyen 13 bang va ten cot de de anh xa sang Model C#.
-    - AUTO_INCREMENT -> IDENTITY(1,1)
-    - VARCHAR du lieu van ban -> NVARCHAR (ho tro tieng Viet)
-    - BOOLEAN -> BIT; ENUM -> NVARCHAR + CHECK
-    - TEXT -> NVARCHAR(MAX); CURRENT_TIMESTAMP -> SYSDATETIME()
-    - ON DELETE RESTRICT -> ON DELETE NO ACTION
-    - Prebuilt_components: FK component_id dung NO ACTION thay cho CASCADE
-      de tranh loi multiple cascade paths cua SQL Server.
-    - Categories: FK parent_id (tu tham chieu) dung NO ACTION thay cho SET NULL
-      de tranh loi Msg 1785 cua SQL Server; xu ly SET NULL cho danh muc con trong code C#.
-
-    Cach dung: Mo file trong SSMS, chon Connect toi SQL Server, bam Execute.
-    Script khong xoa database hay du lieu cu neu chay lai.
-*/
-
 USE [master];
 GO
-
 IF DB_ID(N'computer_store_db') IS NULL
-BEGIN
-    CREATE DATABASE [computer_store_db];
-END;
+    CREATE DATABASE [computer_store_db] COLLATE Latin1_General_100_CI_AI_SC;
 GO
-
 USE [computer_store_db];
 GO
+IF DB_NAME() <> N'computer_store_db'
+    THROW 50000, N'Chưa vào được database computer_store_db. Kiểm tra quyền tạo/chọn database.', 1;
 
--- ============================================================
--- 1. TAI KHOAN VA PHAN QUYEN
--- ============================================================
+SET NOCOUNT ON;
+SET XACT_ABORT ON;
+BEGIN TRY
+    BEGIN TRANSACTION;
 
-IF OBJECT_ID(N'dbo.roles', N'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.roles (
-        id INT IDENTITY(1,1) NOT NULL,
-        role_name NVARCHAR(50) NOT NULL,
-        CONSTRAINT PK_roles PRIMARY KEY (id),
-        CONSTRAINT UQ_roles_role_name UNIQUE (role_name)
+    DECLARE @lockResult INT;
+    EXEC @lockResult = sys.sp_getapplock
+        @Resource = N'PCStore:Initialize', @LockMode = N'Exclusive',
+        @LockOwner = N'Transaction', @LockTimeout = 10000;
+    IF @lockResult < 0 THROW 50000, N'Đang có tiến trình khởi tạo PCStore khác.', 1;
+
+    IF OBJECT_ID(N'dbo.roles', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.roles (
+            id INT IDENTITY(1,1) NOT NULL,
+            role_name NVARCHAR(50) NOT NULL,
+            CONSTRAINT PK_roles PRIMARY KEY (id),
+            CONSTRAINT UQ_roles_role_name UNIQUE (role_name)
+        );
+    END;
+
+    IF OBJECT_ID(N'dbo.users', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.users (
+            id BIGINT IDENTITY(1,1) NOT NULL,
+            username NVARCHAR(50) NOT NULL,
+            [password] NVARCHAR(255) NOT NULL,
+            full_name NVARCHAR(100) NOT NULL,
+            email NVARCHAR(100) NOT NULL,
+            phone NVARCHAR(20) NULL,
+            [address] NVARCHAR(255) NULL,
+            is_active BIT NOT NULL CONSTRAINT DF_users_is_active DEFAULT (1),
+            reset_token NVARCHAR(255) NULL,
+            reset_token_expiry DATETIME2(0) NULL,
+            CONSTRAINT PK_users PRIMARY KEY (id),
+            CONSTRAINT UQ_users_username UNIQUE (username),
+            CONSTRAINT UQ_users_email UNIQUE (email)
+        );
+    END;
+
+    IF OBJECT_ID(N'dbo.user_roles', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.user_roles (
+            user_id BIGINT NOT NULL,
+            role_id INT NOT NULL,
+            CONSTRAINT PK_user_roles PRIMARY KEY (user_id, role_id),
+            CONSTRAINT FK_user_roles_users FOREIGN KEY (user_id)
+                REFERENCES dbo.users(id) ON DELETE CASCADE,
+            CONSTRAINT FK_user_roles_roles FOREIGN KEY (role_id)
+                REFERENCES dbo.roles(id) ON DELETE CASCADE
+        );
+    END;
+
+    -- ============================================================
+    -- 2. DANH MUC VA SAN PHAM
+    -- ============================================================
+
+    IF OBJECT_ID(N'dbo.categories', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.categories (
+            id INT IDENTITY(1,1) NOT NULL,
+            [name] NVARCHAR(100) NOT NULL,
+            parent_id INT NULL,
+            CONSTRAINT PK_categories PRIMARY KEY (id),
+            CONSTRAINT FK_categories_parent FOREIGN KEY (parent_id)
+                REFERENCES dbo.categories(id) ON DELETE NO ACTION
+        );
+    END;
+
+    IF OBJECT_ID(N'dbo.products', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.products (
+            id BIGINT IDENTITY(1,1) NOT NULL,
+            sku NVARCHAR(50) NOT NULL,
+            [name] NVARCHAR(255) NOT NULL,
+            price DECIMAL(15, 2) NOT NULL,
+            stock_quantity INT NOT NULL CONSTRAINT DF_products_stock DEFAULT (0),
+            thumbnail NVARCHAR(255) NULL,
+            product_type NVARCHAR(20) NOT NULL,
+            category_id INT NULL,
+            CONSTRAINT PK_products PRIMARY KEY (id),
+            CONSTRAINT UQ_products_sku UNIQUE (sku),
+            CONSTRAINT CK_products_type CHECK (product_type IN (N'COMPONENT', N'PREBUILT_PC')),
+            CONSTRAINT CK_products_price CHECK (price >= 0),
+            CONSTRAINT CK_products_stock CHECK (stock_quantity >= 0),
+            CONSTRAINT FK_products_categories FOREIGN KEY (category_id)
+                REFERENCES dbo.categories(id) ON DELETE SET NULL
+        );
+    END;
+
+    -- ============================================================
+    -- 3. BUILD PC VA CAU THANH PC NGUYEN BO
+    -- ============================================================
+
+    IF OBJECT_ID(N'dbo.attributes', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.attributes (
+            id INT IDENTITY(1,1) NOT NULL,
+            [name] NVARCHAR(100) NOT NULL,
+            CONSTRAINT PK_attributes PRIMARY KEY (id),
+            CONSTRAINT UQ_attributes_name UNIQUE ([name])
+        );
+    END;
+
+    IF OBJECT_ID(N'dbo.product_attributes', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.product_attributes (
+            product_id BIGINT NOT NULL,
+            attribute_id INT NOT NULL,
+            [value] NVARCHAR(255) NOT NULL,
+            CONSTRAINT PK_product_attributes PRIMARY KEY (product_id, attribute_id),
+            CONSTRAINT FK_product_attributes_products FOREIGN KEY (product_id)
+                REFERENCES dbo.products(id) ON DELETE CASCADE,
+            CONSTRAINT FK_product_attributes_attributes FOREIGN KEY (attribute_id)
+                REFERENCES dbo.attributes(id) ON DELETE CASCADE
+        );
+    END;
+
+    IF OBJECT_ID(N'dbo.prebuilt_components', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.prebuilt_components (
+            pc_id BIGINT NOT NULL,
+            component_id BIGINT NOT NULL,
+            quantity INT NOT NULL CONSTRAINT DF_prebuilt_components_quantity DEFAULT (1),
+            CONSTRAINT PK_prebuilt_components PRIMARY KEY (pc_id, component_id),
+            CONSTRAINT CK_prebuilt_components_quantity CHECK (quantity > 0),
+            CONSTRAINT CK_prebuilt_components_not_self CHECK (pc_id <> component_id),
+            CONSTRAINT FK_prebuilt_components_pc FOREIGN KEY (pc_id)
+                REFERENCES dbo.products(id) ON DELETE CASCADE,
+            CONSTRAINT FK_prebuilt_components_component FOREIGN KEY (component_id)
+                REFERENCES dbo.products(id) ON DELETE NO ACTION
+        );
+    END;
+
+    -- ============================================================
+    -- 4. DON HANG VA CHI TIET DON HANG
+    -- ============================================================
+
+    IF OBJECT_ID(N'dbo.orders', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.orders (
+            id BIGINT IDENTITY(1,1) NOT NULL,
+            user_id BIGINT NULL,                 -- Khach vang lai duoc de NULL
+            receiver_name NVARCHAR(100) NOT NULL,
+            receiver_phone NVARCHAR(20) NOT NULL,
+            receiver_email NVARCHAR(100) NULL,
+            province NVARCHAR(100) NOT NULL,
+            district NVARCHAR(100) NOT NULL,
+            address_detail NVARCHAR(255) NOT NULL,
+            order_note NVARCHAR(MAX) NULL,
+            order_date DATETIME2(0) NOT NULL
+                CONSTRAINT DF_orders_order_date DEFAULT (SYSDATETIME()),
+            total_amount DECIMAL(15, 2) NOT NULL,
+            payment_method NVARCHAR(50) NOT NULL,
+            [status] NVARCHAR(20) NOT NULL
+                CONSTRAINT DF_orders_status DEFAULT (N'PENDING'),
+            CONSTRAINT PK_orders PRIMARY KEY (id),
+            CONSTRAINT CK_orders_total CHECK (total_amount >= 0),
+            CONSTRAINT CK_orders_status CHECK ([status] IN
+                (N'PENDING', N'CONFIRMED', N'SHIPPING', N'COMPLETED', N'CANCELLED')),
+            CONSTRAINT FK_orders_users FOREIGN KEY (user_id)
+                REFERENCES dbo.users(id) ON DELETE SET NULL
+        );
+    END;
+
+    IF OBJECT_ID(N'dbo.order_details', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.order_details (
+            id BIGINT IDENTITY(1,1) NOT NULL,
+            order_id BIGINT NOT NULL,
+            product_id BIGINT NOT NULL,
+            quantity INT NOT NULL,
+            unit_price DECIMAL(15, 2) NOT NULL,
+            CONSTRAINT PK_order_details PRIMARY KEY (id),
+            CONSTRAINT CK_order_details_quantity CHECK (quantity > 0),
+            CONSTRAINT CK_order_details_price CHECK (unit_price >= 0),
+            CONSTRAINT FK_order_details_orders FOREIGN KEY (order_id)
+                REFERENCES dbo.orders(id) ON DELETE CASCADE,
+            CONSTRAINT FK_order_details_products FOREIGN KEY (product_id)
+                REFERENCES dbo.products(id) ON DELETE NO ACTION
+        );
+    END;
+
+    -- ============================================================
+    -- 5. NHA CUNG CAP VA NHAP KHO
+    -- ============================================================
+
+    IF OBJECT_ID(N'dbo.suppliers', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.suppliers (
+            id INT IDENTITY(1,1) NOT NULL,
+            [name] NVARCHAR(255) NOT NULL,
+            phone NVARCHAR(20) NOT NULL,
+            email NVARCHAR(100) NULL,
+            [address] NVARCHAR(255) NULL,
+            CONSTRAINT PK_suppliers PRIMARY KEY (id)
+        );
+    END;
+
+    IF OBJECT_ID(N'dbo.import_orders', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.import_orders (
+            id BIGINT IDENTITY(1,1) NOT NULL,
+            supplier_id INT NOT NULL,
+            user_id BIGINT NOT NULL,             -- Nguoi lap phieu nhap
+            import_date DATETIME2(0) NOT NULL
+                CONSTRAINT DF_import_orders_date DEFAULT (SYSDATETIME()),
+            total_amount DECIMAL(15, 2) NOT NULL,
+            note NVARCHAR(MAX) NULL,
+            CONSTRAINT PK_import_orders PRIMARY KEY (id),
+            CONSTRAINT CK_import_orders_total CHECK (total_amount >= 0),
+            CONSTRAINT FK_import_orders_suppliers FOREIGN KEY (supplier_id)
+                REFERENCES dbo.suppliers(id) ON DELETE NO ACTION,
+            CONSTRAINT FK_import_orders_users FOREIGN KEY (user_id)
+                REFERENCES dbo.users(id) ON DELETE NO ACTION
+        );
+    END;
+
+    IF OBJECT_ID(N'dbo.import_order_details', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.import_order_details (
+            id BIGINT IDENTITY(1,1) NOT NULL,
+            import_order_id BIGINT NOT NULL,
+            product_id BIGINT NOT NULL,
+            quantity INT NOT NULL,
+            import_price DECIMAL(15, 2) NOT NULL,
+            CONSTRAINT PK_import_order_details PRIMARY KEY (id),
+            CONSTRAINT CK_import_order_details_quantity CHECK (quantity > 0),
+            CONSTRAINT CK_import_order_details_price CHECK (import_price >= 0),
+            CONSTRAINT FK_import_order_details_import_orders FOREIGN KEY (import_order_id)
+                REFERENCES dbo.import_orders(id) ON DELETE CASCADE,
+            CONSTRAINT FK_import_order_details_products FOREIGN KEY (product_id)
+                REFERENCES dbo.products(id) ON DELETE NO ACTION
+        );
+    END;
+
+    -- ============================================================
+    -- 6. CHI MUC PHUC VU TRUY VAN, LOC SAN PHAM VA DON HANG
+    -- ============================================================
+
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.user_roles') AND name = N'IX_user_roles_role_id')
+        CREATE INDEX IX_user_roles_role_id ON dbo.user_roles(role_id);
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.categories') AND name = N'IX_categories_parent_id')
+        CREATE INDEX IX_categories_parent_id ON dbo.categories(parent_id);
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.products') AND name = N'IX_products_category_type_price')
+        CREATE INDEX IX_products_category_type_price ON dbo.products(category_id, product_type, price);
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.product_attributes') AND name = N'IX_product_attributes_attribute_id')
+        CREATE INDEX IX_product_attributes_attribute_id ON dbo.product_attributes(attribute_id);
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.prebuilt_components') AND name = N'IX_prebuilt_components_component_id')
+        CREATE INDEX IX_prebuilt_components_component_id ON dbo.prebuilt_components(component_id);
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.orders') AND name = N'IX_orders_user_date')
+        CREATE INDEX IX_orders_user_date ON dbo.orders(user_id, order_date);
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.orders') AND name = N'IX_orders_status_date')
+        CREATE INDEX IX_orders_status_date ON dbo.orders([status], order_date);
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.order_details') AND name = N'IX_order_details_order_id')
+        CREATE INDEX IX_order_details_order_id ON dbo.order_details(order_id);
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.order_details') AND name = N'IX_order_details_product_id')
+        CREATE INDEX IX_order_details_product_id ON dbo.order_details(product_id);
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.import_orders') AND name = N'IX_import_orders_supplier_id')
+        CREATE INDEX IX_import_orders_supplier_id ON dbo.import_orders(supplier_id);
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.import_orders') AND name = N'IX_import_orders_user_id')
+        CREATE INDEX IX_import_orders_user_id ON dbo.import_orders(user_id);
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.import_order_details') AND name = N'IX_import_order_details_import_order_id')
+        CREATE INDEX IX_import_order_details_import_order_id ON dbo.import_order_details(import_order_id);
+    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.import_order_details') AND name = N'IX_import_order_details_product_id')
+        CREATE INDEX IX_import_order_details_product_id ON dbo.import_order_details(product_id);
+
+    IF COL_LENGTH(N'dbo.users', N'reset_token') IS NULL
+        ALTER TABLE dbo.users ADD reset_token NVARCHAR(255) NULL;
+    IF COL_LENGTH(N'dbo.users', N'reset_token_expiry') IS NULL
+        ALTER TABLE dbo.users ADD reset_token_expiry DATETIME2(0) NULL;
+
+    IF OBJECT_ID(N'dbo.catalog_sources', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.catalog_sources (
+            product_id BIGINT NOT NULL CONSTRAINT PK_catalog_sources PRIMARY KEY,
+            source_url NVARCHAR(1024) NOT NULL,
+            image_url NVARCHAR(1024) NOT NULL,
+            captured_on DATE NOT NULL,
+            price_status NVARCHAR(30) NOT NULL,
+            stock_status NVARCHAR(30) NOT NULL,
+            note NVARCHAR(512) NOT NULL,
+            CONSTRAINT FK_catalog_sources_products FOREIGN KEY (product_id)
+                REFERENCES dbo.products(id) ON DELETE CASCADE
+        );
+    END;
+
+    IF OBJECT_ID(N'dbo.catalog_related_sources', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.catalog_related_sources (
+            id BIGINT IDENTITY(1, 1) NOT NULL CONSTRAINT PK_catalog_related_sources PRIMARY KEY,
+            product_id BIGINT NOT NULL,
+            source_url NVARCHAR(1024) NOT NULL,
+            CONSTRAINT FK_catalog_related_sources_products FOREIGN KEY (product_id)
+                REFERENCES dbo.products(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IX_catalog_related_sources_product_id ON dbo.catalog_related_sources(product_id);
+    END;
+
+    IF OBJECT_ID(N'dbo.catalog_attribute_sources', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.catalog_attribute_sources (
+            product_id BIGINT NOT NULL,
+            attribute_id INT NOT NULL,
+            source_status NVARCHAR(30) NOT NULL,
+            source_url NVARCHAR(1024) NOT NULL,
+            source_note NVARCHAR(512) NOT NULL,
+            captured_on DATE NOT NULL,
+            CONSTRAINT PK_catalog_attribute_sources PRIMARY KEY (product_id, attribute_id),
+            CONSTRAINT FK_catalog_attribute_sources_product_attributes FOREIGN KEY (product_id, attribute_id)
+                REFERENCES dbo.product_attributes(product_id, attribute_id) ON DELETE CASCADE
+        );
+    END;
+
+    IF OBJECT_ID(N'dbo.demo_seed_runs', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.demo_seed_runs (
+            run_key NVARCHAR(80) NOT NULL CONSTRAINT PK_demo_seed_runs PRIMARY KEY,
+            applied_at DATETIME2(0) NOT NULL CONSTRAINT DF_demo_seed_runs_applied_at DEFAULT (SYSDATETIME()),
+            description NVARCHAR(255) NOT NULL
+        );
+    END;
+
+    IF NOT EXISTS (SELECT 1 FROM dbo.roles WHERE role_name = N'ROLE_ADMIN')
+        INSERT INTO dbo.roles(role_name) VALUES (N'ROLE_ADMIN');
+    IF NOT EXISTS (SELECT 1 FROM dbo.roles WHERE role_name = N'ROLE_USER')
+        INSERT INTO dbo.roles(role_name) VALUES (N'ROLE_USER');
+
+    COMMIT TRANSACTION;
+END TRY
+BEGIN CATCH
+    IF XACT_STATE() <> 0 ROLLBACK TRANSACTION;
+    THROW;
+END CATCH;
+GO
+
+-- Nạp dữ liệu catalog. Các dữ liệu giao dịch mẫu được tách riêng.
+IF DB_NAME() <> N'computer_store_db'
+    THROW 50000, N'Chọn database computer_store_db trước khi nhập catalog.', 1;
+IF OBJECT_ID(N'dbo.demo_seed_runs', N'U') IS NULL
+    THROW 50000, N'Chưa tạo xong cấu trúc PCStore.', 1;
+
+SET NOCOUNT ON;
+SET XACT_ABORT ON;
+BEGIN TRY
+    BEGIN TRANSACTION;
+
+    DECLARE @lockResult INT;
+    EXEC @lockResult = sys.sp_getapplock
+        @Resource = N'PCStore:Initialize', @LockMode = N'Exclusive',
+        @LockOwner = N'Transaction', @LockTimeout = 10000;
+    IF @lockResult < 0 THROW 50000, N'Đang có tiến trình khởi tạo PCStore khác.', 1;
+
+    IF EXISTS (SELECT 1 FROM dbo.demo_seed_runs WHERE run_key = N'PCSTORE_CATALOG_V1')
+    BEGIN
+        COMMIT TRANSACTION;
+        SELECT N'Đã nhập catalog trước đó. Bỏ qua.' AS ket_qua;
+        RETURN;
+    END;
+
+    CREATE TABLE #category_seed (
+        id INT PRIMARY KEY, [name] NVARCHAR(100) COLLATE DATABASE_DEFAULT NOT NULL, parent_id INT NULL
     );
-END;
-GO
-
-IF OBJECT_ID(N'dbo.users', N'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.users (
-        id BIGINT IDENTITY(1,1) NOT NULL,
-        username NVARCHAR(50) NOT NULL,
-        [password] NVARCHAR(255) NOT NULL,
-        full_name NVARCHAR(100) NOT NULL,
-        email NVARCHAR(100) NOT NULL,
-        phone NVARCHAR(20) NULL,
-        [address] NVARCHAR(255) NULL,
-        is_active BIT NOT NULL CONSTRAINT DF_users_is_active DEFAULT (1),
-        CONSTRAINT PK_users PRIMARY KEY (id),
-        CONSTRAINT UQ_users_username UNIQUE (username),
-        CONSTRAINT UQ_users_email UNIQUE (email)
+    CREATE TABLE #product_seed (
+        id BIGINT PRIMARY KEY, sku NVARCHAR(50) COLLATE DATABASE_DEFAULT NOT NULL UNIQUE,
+        [name] NVARCHAR(255) COLLATE DATABASE_DEFAULT NOT NULL, price DECIMAL(15, 2) NOT NULL,
+        stock_quantity INT NOT NULL, thumbnail NVARCHAR(255) NULL, product_type NVARCHAR(20) NOT NULL,
+        category_id INT NULL
     );
-END;
-GO
-
-IF OBJECT_ID(N'dbo.user_roles', N'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.user_roles (
-        user_id BIGINT NOT NULL,
-        role_id INT NOT NULL,
-        CONSTRAINT PK_user_roles PRIMARY KEY (user_id, role_id),
-        CONSTRAINT FK_user_roles_users FOREIGN KEY (user_id)
-            REFERENCES dbo.users(id) ON DELETE CASCADE,
-        CONSTRAINT FK_user_roles_roles FOREIGN KEY (role_id)
-            REFERENCES dbo.roles(id) ON DELETE CASCADE
+    CREATE TABLE #source_seed (
+        product_id BIGINT PRIMARY KEY, source_url NVARCHAR(1024) NOT NULL,
+        image_url NVARCHAR(1024) NOT NULL, captured_on DATE NOT NULL,
+        price_status NVARCHAR(30) NOT NULL, stock_status NVARCHAR(30) NOT NULL, note NVARCHAR(512) NOT NULL
     );
-END;
-GO
-
--- ============================================================
--- 2. DANH MUC VA SAN PHAM
--- ============================================================
-
-IF OBJECT_ID(N'dbo.categories', N'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.categories (
-        id INT IDENTITY(1,1) NOT NULL,
-        [name] NVARCHAR(100) NOT NULL,
-        parent_id INT NULL,
-        CONSTRAINT PK_categories PRIMARY KEY (id),
-        CONSTRAINT CK_categories_not_self CHECK (parent_id IS NULL OR parent_id <> id),
-        CONSTRAINT FK_categories_parent FOREIGN KEY (parent_id)
-            REFERENCES dbo.categories(id) ON DELETE NO ACTION
+    CREATE TABLE #related_source_seed (
+        product_id BIGINT NOT NULL, source_url NVARCHAR(1024) COLLATE DATABASE_DEFAULT NOT NULL
     );
-END;
-GO
-
-IF OBJECT_ID(N'dbo.products', N'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.products (
-        id BIGINT IDENTITY(1,1) NOT NULL,
-        sku NVARCHAR(50) NOT NULL,
-        [name] NVARCHAR(255) NOT NULL,
-        price DECIMAL(15, 2) NOT NULL,
-        stock_quantity INT NOT NULL CONSTRAINT DF_products_stock DEFAULT (0),
-        thumbnail NVARCHAR(255) NULL,
-        product_type NVARCHAR(20) NOT NULL,
-        category_id INT NULL,
-        CONSTRAINT PK_products PRIMARY KEY (id),
-        CONSTRAINT UQ_products_sku UNIQUE (sku),
-        CONSTRAINT CK_products_type CHECK (product_type IN (N'COMPONENT', N'PREBUILT_PC')),
-        CONSTRAINT CK_products_price CHECK (price >= 0),
-        CONSTRAINT CK_products_stock CHECK (stock_quantity >= 0),
-        CONSTRAINT FK_products_categories FOREIGN KEY (category_id)
-            REFERENCES dbo.categories(id) ON DELETE SET NULL
+    CREATE TABLE #spec_seed (
+        sku NVARCHAR(50) COLLATE DATABASE_DEFAULT NOT NULL,
+        attribute_name NVARCHAR(100) COLLATE DATABASE_DEFAULT NOT NULL,
+        attribute_value NVARCHAR(255) NOT NULL,
+        source_status NVARCHAR(30) NOT NULL, source_url NVARCHAR(1024) NOT NULL,
+        source_note NVARCHAR(512) NOT NULL,
+        PRIMARY KEY (sku, attribute_name)
     );
-END;
-GO
 
--- ============================================================
--- 3. BUILD PC VA CAU THANH PC NGUYEN BO
--- ============================================================
+    INSERT INTO #category_seed (id, [name], parent_id) VALUES
+        (1, N'PC Ráp Sẵn', NULL),
+        (2, N'Linh Kiện Máy Tính', NULL),
+        (3, N'Phụ Kiện', NULL),
+        (4, N'PC Gaming', 1),
+        (5, N'PC Văn Phòng', 1),
+        (6, N'PC Đồ Họa - Creator', 1),
+        (7, N'Vi xử lý (CPU)', 2),
+        (8, N'Bo mạch chủ (Mainboard)', 2),
+        (9, N'Card màn hình (VGA)', 2),
+        (10, N'Bộ nhớ trong (RAM)', 2),
+        (11, N'Ổ cứng SSD', 2),
+        (12, N'Ổ cứng HDD', 2),
+        (13, N'Nguồn máy tính (PSU)', 2),
+        (14, N'Vỏ máy tính (Case)', 2),
+        (15, N'Tản nhiệt khí', 2),
+        (16, N'Tản nhiệt nước AIO', 2),
+        (17, N'Fan tản nhiệt', 2),
+        (18, N'Màn hình', 3),
+        (19, N'Bàn phím', 3),
+        (20, N'Chuột', 3),
+        (21, N'Loa', 3),
+        (22, N'Tai nghe', 3),
+        (23, N'Webcam', 3),
+        (24, N'Microphones', 3),
+        (25, N'Giá treo màn hình', 3);
 
-IF OBJECT_ID(N'dbo.attributes', N'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.attributes (
-        id INT IDENTITY(1,1) NOT NULL,
-        [name] NVARCHAR(100) NOT NULL,
-        CONSTRAINT PK_attributes PRIMARY KEY (id),
-        CONSTRAINT UQ_attributes_name UNIQUE ([name])
+    INSERT INTO #product_seed (id, sku, [name], price, stock_quantity, thumbnail, product_type, category_id) VALUES
+        (1, N'THNS-1062950403', N'PC Gaming STAR Yasuo | Intel I5 12400F, RTX 3050 6G, H610M, RAM 16GB, SSD 500GB', 17137000, 20, N'https://cdn.hstatic.net/products/200000420363/03bbac5e-ad97-4c64-83e7-aa48d10e947c_316ba5f560a747839af2cc79756104a7.jpg', N'PREBUILT_PC', 4),
+        (2, N'THNS-1071351902', N'PC Gaming Storm E | Intel Core i3 13100F, RAM 16GB, SSD 512, RTX 3050', 16387000, 20, N'https://cdn.hstatic.net/products/200000420363/03bbac5e-ad97-4c64-83e7-aa48d10e947c_74896d2ba28d4df080ea3ce49ff89967.jpg', N'PREBUILT_PC', 4),
+        (3, N'THNS-1058013582', N'PC Gaming Cypher | Intel i3 12100F \ RTX 3050 6G\ H610M\ DDR5 16GB\ SSD 512GB', 17757000, 20, N'https://cdn.hstatic.net/products/200000420363/03bbac5e-ad97-4c64-83e7-aa48d10e947c_8b793d288a014ec0bbaaaf7f58aaedb2.jpg', N'PREBUILT_PC', 4),
+        (4, N'THNS-1067291853', N'PC Gaming Hunt E | AMD Ryzen 5 5500, B450, RAM 16GB, SSD 512GB, RX 6500XT', 14617000, 20, N'https://cdn.hstatic.net/products/200000420363/03bbac5e-ad97-4c64-83e7-aa48d10e947c_10caa3824ccd49b9b0a026f2ab3cdf63.jpg', N'PREBUILT_PC', 4),
+        (5, N'THNS-1076093219', N'PC Văn Phòng StarPC Office 5 | AMD Ryzen 5 5500GT, RAM 8GB, SSD 512GB, Win 11 Pro', 9790000, 20, N'https://cdn.hstatic.net/products/200000420363/starpc_office_5_amd_ryzen_5_5500gt-_ram_8gb-_ssd_512gb-_win_11_pro__1__d59fcd531b7749f5b0b376c1c467000e.webp', N'PREBUILT_PC', 5),
+        (6, N'THNS-1076093143', N'PC Văn Phòng StarPC Office 5 | AMD Ryzen 5 3400G,RAM 8GB, SSD 512GB, Win 11 Pro', 8990000, 20, N'https://cdn.hstatic.net/products/200000420363/_office_5_amd_ryzen_5_3400g_ram_8gb__ssd_512gb__win_11_pro__1__9a0aa9f00d5447cb97c82fdde2712701.webp', N'PREBUILT_PC', 5),
+        (7, N'THNS-1076093073', N'PC Văn Phòng StarPC Office 5 | Intel Core i5 14400, RAM 8GB, SSD 512GB, Wi-Fi, Win 11 Pro', 15490000, 20, N'https://cdn.hstatic.net/products/200000420363/ffice_5_intel_core_i5_14400-_ram_8gb-_ssd_512gb-_wi-fi-_win_11_pro__1__95a14b7b90184b9299e8621f00194a85.webp', N'PREBUILT_PC', 5),
+        (8, N'THNS-1076092983', N'PC Văn Phòng StarPC Office 3 | Intel Core i3 14100, RAM 8GB, SSD 512GB, Wi-Fi, Win 11 Pro', 10590000, 20, N'https://cdn.hstatic.net/products/200000420363/c__starpc_office_3__ryzen_3_3200g__8gb_ram__256gb_ssd__win_11_pro___1__463185f9e7694b50a5ad0e1cb3aae142.webp', N'PREBUILT_PC', 5),
+        (9, N'THNS-1038110471', N'CPU Intel Core i5 12400F | LGA 1700, 6 nhân/12 luồng, Max 4.4 GHz', 3850000, 20, N'https://cdn.hstatic.net/products/200000420363/i5-12th_ef60688e685f4affa651f320_95172b46b0e74a3397888cf57ca4ad1e.jpg', N'COMPONENT', 7),
+        (10, N'THNS-1072199782', N'CPU Intel Core i3-14100 Tray Chính Hãng ( No box)', 3590000, 20, N'https://cdn.hstatic.net/products/200000420363/61741_cpu_intel_core_i3_14100_tr_accd76f565264dd8ac87af3de72e4100.png', N'COMPONENT', 7),
+        (11, N'THNS-1052931637', N'CPU AMD Ryzen 5 5500GT | AM4, 6 nhân/12 luồng, Max 4.4 GHz', 3890000, 20, N'https://cdn.hstatic.net/products/200000420363/r5-gen-5_027c969098d941bbb045c81_c017c0670464436c979607bb5181c604.png', N'COMPONENT', 7),
+        (12, N'THNS-1040779286', N'CPU AMD Ryzen 5 5500 | AM4, 6 nhân/12 luồng, Max 4.2 GHz', 2350000, 20, N'https://cdn.hstatic.net/products/200000420363/r5-gen-5_f301d9ce73554b68b20b982_af086b7dfe174c41b79149d0ae6f9d31.png', N'COMPONENT', 7),
+        (13, N'THNS-1051826646', N'CPU Intel Core i3 14100 | LGA 1700, 4 nhân/8 luồng, Max 4.7 GHz', 3690000, 20, N'https://cdn.hstatic.net/products/200000420363/download__56__2cfce3efafdb4ac2b4622fc5a9875c2d.png', N'COMPONENT', 7),
+        (14, N'THNS-1036949461', N'CPU AMD Ryzen 5 5600G | AM4, 6 nhân/12 luồng, Max 4.4 GHz', 3790000, 20, N'https://cdn.hstatic.net/products/200000420363/r5-gen-5_f301d9ce73554b68b20b982_17636c1494bd4e2da4adea11fa38643e.png', N'COMPONENT', 7),
+        (15, N'THNS-1036949464', N'CPU AMD Ryzen 5 5600X | AM4, 6 nhân/12 luồng, Max 4.6 GHz', 3640000, 20, N'https://cdn.hstatic.net/products/200000420363/r5-gen-5_027c969098d941bbb045c81_7a054baea0924a0eaa92a21cdefac2c4.png', N'COMPONENT', 7),
+        (16, N'THNS-1075978711', N'CPU Intel Core i5 14400 Tray Chính Hãng (No Box, Không kèm Fan) | LGA1700, 10 nhân/16 luồng, Cache 20MB, Max Turbo 4.7GHz', 4990000, 20, N'https://cdn.hstatic.net/products/200000420363/i5.14400.tr.ch_1ff50b5130464f5280bd4df19ce194f6.png', N'COMPONENT', 7),
+        (17, N'THNS-1072199780', N'CPU Intel Core i7-12700 Tray Chính Hãng (No Box)', 8090000, 20, N'https://cdn.hstatic.net/products/200000420363/54743_cpu_intel_core_i7_12700__i_6652ee891a7946dfb42d0d3c93a88d1b.png', N'COMPONENT', 7),
+        (18, N'THNS-1043309247', N'CPU Intel Core i3 13100F | LGA1700, 4 nhân/8 luồng, Max 4.5 GHz', 2690000, 20, N'https://product.hstatic.net/200000420363/product/i3.13100f.b.ch_dfc1c227e982496d944da7bfd07b209f.jpg', N'COMPONENT', 7),
+        (19, N'THNS-1073804366', N'CPU Intel Core i3-12100 Tray Chính Hãng (No Box) | LGA 1700, 4 nhân/8 luồng, Max 4.3GHz', 3590000, 20, N'https://cdn.hstatic.net/products/200000420363/t_i_xu_ng__7__7782e566d41b49628e6f00cddd07cec7.png', N'COMPONENT', 7),
+        (20, N'THNS-1050822626', N'CPU Intel Core i9 14900K | LGA 1700, 24 nhân/32 luồng, Max 5.6 GHz', 13790000, 20, N'https://cdn.hstatic.net/products/200000420363/i9-14th_c146ac75245e4f2ea81513b8_83e9140124ba4052a6f25aecfa2073f3.jpg', N'COMPONENT', 7),
+        (21, N'THNS-1072199781', N'CPU Intel Core i5-12400 Tray Chính Hãng (No Box)', 4390000, 20, N'https://cdn.hstatic.net/products/200000420363/cpu-intel-core-i5-12400-tray-new_be05e537387f4051a6a776cd258e9f81.png', N'COMPONENT', 7),
+        (22, N'THNS-1051827862', N'CPU Intel Core i7 14700F | LGA 1700, 20 nhân/28 luồng, Max 5.4 GHz', 8790000, 20, N'https://cdn.hstatic.net/products/200000420363/chatgpt_image_09_51_58_9_thg_1__2026_86b262c4dba44c529c8d3d0b001edde9.png', N'COMPONENT', 7),
+        (23, N'THNS-1053987294', N'Mainboard ASUS Prime B760M-F D4 DDR4 | LGA 1700, mATX, 2 khe RAM', 2150000, 20, N'https://cdn.hstatic.net/products/200000420363/w692__1__copy_a4b6a876a28c4e6ebf47f05bf941be82.jpg', N'COMPONENT', 8),
+        (24, N'THNS-1069254481', N'Mainboard Gigabyte H610M K Rev 1.0 DDR4 | LGA 1700, mATX, 2 khe RAM', 1590000, 20, N'https://cdn.hstatic.net/products/200000420363/tinhocngoisao.com1__5__535b87fad6ba45bb9ceb4e9e0be23984.png', N'COMPONENT', 8),
+        (25, N'THNS-1066944720', N'Mainboard Gigabyte A520M K V2 DDR4 | AM4, mATX, 2 khe RAM', 1350000, 20, N'https://product.hstatic.net/200000420363/product/a520m_k_v2-01_74f2863372b8454da6f06bd334852c68.png', N'COMPONENT', 8),
+        (26, N'THNS-1050059551', N'Mainboard MSI PRO B760M-E DDR4 | LGA 1700, mATX, 2 khe RAM', 2199000, 20, N'https://product.hstatic.net/200000420363/product/pro-b760m-e-ddr4-4_dd45c96a308148408f3631cd4a4442c2.jpg', N'COMPONENT', 8),
+        (27, N'THNS-1038110499', N'Mainboard ASUS Prime H610M-K DDR4 | LGA 1700, mATX, 2 khe RAM', 1690000, 20, N'https://cdn.hstatic.net/products/200000420363/40447_4_copy_01b57a934c00479592d6139303b0b6d9.jpg', N'COMPONENT', 8),
+        (28, N'THNS-1056586973', N'Mainboard Gigabyte H610M H V3 Rev 1.0 DDR4 | LGA 1700, mATX, 2 khe RAM', 1650000, 20, N'https://product.hstatic.net/200000420363/product/h610m_h_v3_ddr4-01_ecca259dc84a497bbcc6c0fb09965f40.png', N'COMPONENT', 8),
+        (29, N'THNS-1076583486', N'Mainboard MSI PRO A520M-S | AMD A520, AM4, 2 khe DDR4, PCIe 3.0', 1340000, 20, N'https://cdn.hstatic.net/products/200000420363/m.msi.a520m-s_7c0793b0bc76414fa4fa010920182d5f.png', N'COMPONENT', 8),
+        (30, N'THNS-1057644780', N'Mainboard MSI B450M-A PRO MAX II DDR4 | AM4, mATX, 2 khe RAM', 1490000, 20, N'https://product.hstatic.net/200000420363/product/1024__8__8b66565bbdfc46bc8da36d631308beff.png', N'COMPONENT', 8),
+        (31, N'THNS-1042671270', N'Mainboard MSI PRO H610M-E DDR4 | LGA 1700, mATX, 2 khe RAM', 1590000, 20, N'https://cdn.hstatic.net/products/200000420363/1024__25__copy_6f3dadebd68548f6ace9948b9650e038.jpg', N'COMPONENT', 8),
+        (32, N'THNS-1054227494', N'Mainboard ASRock A520M.AC Wifi DDR4 | AM4, mATX, 2 khe RAM', 1490000, 20, N'https://product.hstatic.net/200000420363/product/mainboard-asrock-520m-4_74c46732c8e14c7dac3c89efb0f264d4.png', N'COMPONENT', 8),
+        (33, N'THNS-1068181034', N'Mainboard Gigabyte B760M K V2 Rev 1.0 DDR4 | LGA 1700, mATX, 2 khe RAM', 2090000, 20, N'https://product.hstatic.net/200000420363/product/_nh_d_i_di_n_sp_thns__1000_x_1000_px__69__99047a25972342f1be8af7bed48a6025.png', N'COMPONENT', 8),
+        (34, N'THNS-1054450412', N'Mainboard ASUS Prime B760M-A D4-CSM DDR4 | LGA 1700, mATX, 4 khe RAM', 2550000, 20, N'https://cdn.hstatic.net/products/200000420363/rpw0hdg-w9n0eqoez98odiaoex7zc1tv_72311e3aa06641549f65ee9e7d5d65de.png', N'COMPONENT', 8),
+        (35, N'THNS-1071856605', N'Mainboard Colorful BATTLE-AX H610M-P Wifi DDR5 | LGA 1700, mATX, 2 khe RAM', 1610000, 20, N'https://cdn.hstatic.net/products/200000420363/1-3_e726293ffd0040d387d1e3ee399e4712.jpg', N'COMPONENT', 8),
+        (36, N'THNS-1054725545', N'Mainboard Gigabyte B760M Gaming Plus Wifi DDR4 | LGA 1700, mATX, 4 khe RAM', 3199000, 20, N'https://product.hstatic.net/200000420363/product/b760m_gaming_plus_wifi_ddr4-01_a4788a7b49f045c188a6cebd9481ae4a.png', N'COMPONENT', 8),
+        (37, N'THNS-1044962543', N'Mainboard ASUS Prime B760M-K DDR4 | LGA 1700, mATX, 2 khe RAM', 2290000, 20, N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_402e7e26fca442c9a79aa7bec5f6a29b.png', N'COMPONENT', 8),
+        (38, N'THNS-1064494012', N'Card màn hình NVIDIA GeForce RTX 3050 Gigabyte WindForce OC | 6GB GDDR6, 2304 CUDA, 300W', 5650000, 20, N'https://product.hstatic.net/200000420363/product/geforce_rtx__3050_windforce_oc_v2_6g-01_614c69be08fb4516846c6291df9c1558.png', N'COMPONENT', 9),
+        (39, N'THNS-1057708292', N'Card màn hình AMD Radeon RX 6500 XT ASUS Dual OC | 4GB GDDR6, 1024 SP, 500W', 4390000, 20, N'https://product.hstatic.net/200000420363/product/tai_xuong_3644fdcb201747e3a3264c2efdd7dfd4.png', N'COMPONENT', 9),
+        (40, N'THNS-1062006338', N'Card màn hình NVIDIA GeForce RTX 3050 Gigabyte WindForce OC | 8GB GDDR6, 2560 CUDA, 450W', 7090000, 20, N'https://product.hstatic.net/200000420363/product/geforce_rtx__3050_windforce_oc_v2_8g-01_51ae19ffa28a44628f3331fb8a27f693.png', N'COMPONENT', 9),
+        (41, N'THNS-1063591197', N'Card màn hình NVIDIA GeForce RTX 3050 MSI Ventus 2X E OC | 6GB GDDR6, 2560 CUDA, 300W', 5590000, 20, N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_ee62b9e69a754aa382521891cda0b1b9.png', N'COMPONENT', 9),
+        (42, N'THNS-1036949763', N'Card màn hình NVIDIA GeForce RTX 3060 MSI Ventus 2X OC | 12GB GDDR6, 3584 CUDA, 550W', 10390000, 20, N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_74d1af83fd7f48adb3baf2b2358f2c70.png', N'COMPONENT', 9),
+        (43, N'THNS-1040779352', N'Card màn hình NVIDIA GeForce GT 730 ASUS | 2GB GDDR5, 384 CUDA, 300W', 1690000, 20, N'https://product.hstatic.net/200000420363/product/1_09006a20467d405d89b553217b63644b.jpg', N'COMPONENT', 9),
+        (44, N'THNS-1075144612', N'Card màn hình MSI GeForce RTX 5060 8G VENTUS 2X OC V1| 8GB GDDR7, 3840 CUDA Cores, PCIe Gen5', 13790000, 20, N'https://cdn.hstatic.net/products/200000420363/v.5060.8g.msi.ventus2x.oc.v1_7aca4118384e4ea7b02199b20b9f4593.png', N'COMPONENT', 9),
+        (45, N'THNS-1067308152', N'Card màn hình NVIDIA GeForce RTX 5060 Gigabyte WINDFORCE OC | 8GB GDDR7, 3840 CUDA, 450W', 13790000, 20, N'https://product.hstatic.net/200000420363/product/geforce_rtx__5060_windforce_oc_8g-01_3a2660a6265e4ef7b7b34c9c815afdf4.png', N'COMPONENT', 9),
+        (46, N'THNS-1073642741', N'Card màn hình INNO3D GeForce GT 1030 | 2GB GDDR5, 384 CUDA, 300W', 2090000, 20, N'https://cdn.hstatic.net/products/200000420363/imgi_24_1030_fanless_n1030-1sdv-e5bl_box-set_0e2ca513219b4cba972969152cb081c9.jpg', N'COMPONENT', 9),
+        (47, N'THNS-1053836451', N'Card màn hình Asus Dual RTX 3050 6GB', 5400000, 20, N'https://www.nguyencongpc.vn/media/product/27384-asus-dual-rtx-3050-6gb-gddr6-1.jpg', N'COMPONENT', 9),
+        (48, N'THNS-1073667329', N'Card màn hình (AMD) ASUS DUAL RX 9060XT (DUAL-RX9060XT-16G) | 16GB GDDR6, 2048 Stream', 14490000, 20, N'https://cdn.hstatic.net/products/200000420363/t_i_xu_ng__26__copy_e6d8db967b6b43d9b9c1e1baf8e994b7.jpg', N'COMPONENT', 9),
+        (49, N'THNS-1053236663', N'Card màn hình NVIDIA GeForce RTX 3050 ASUS Dual OC | 6GB GDDR6, 2304 CUDA, 450W', 5650000, 20, N'https://product.hstatic.net/200000420363/product/tai_xuong__52__7269434c8f80479b858bef5bdd469ac6.png', N'COMPONENT', 9),
+        (50, N'THNS-1066854146', N'Card màn hình AMD Radeon RX 7600 ASUS Dual EVO OC | 8GB GDDR6, 2048 SP, 550W', 7790000, 20, N'https://product.hstatic.net/200000420363/product/tai_xuong__5__66c0e08f98c043b086147fd470e43eb3.png', N'COMPONENT', 9),
+        (51, N'THNS-1064200364', N'Card màn hình NVIDIA GeForce RTX 5070 ZOTAC SOLID OC | 12GB GDDR7, 6144 CUDA, 650W', 26990000, 20, N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_ca31830fb7f5405aa000a2ed7e98fac0.png', N'COMPONENT', 9),
+        (52, N'THNS-1076765846', N'Card màn hình ZOTAC GAMING GeForce RTX 5060 Twin Edge Plus 8GB GDDR7 (ZT-B50600E2-10M) | 3840 CUDA, 2497 MHz, 2 Fan', 13750000, 20, N'https://cdn.hstatic.net/products/200000420363/v.5060.8g.zt.twin.plus_d75234518f1941929c0807e37d6fecd6.jpg', N'COMPONENT', 9),
+        (53, N'THNS-1075417502', N'Card màn hình ASUS Dual GeForce RTX 5060 8GB GDDR7 OC Edition - A (DUAL-RTX5060-O8G-A) | 3840 CUDA, PCIe 5.0', 13790000, 20, N'https://cdn.hstatic.net/products/200000420363/v.5060.8g.as.dual.oc.a8_ffdfbf461dca4741bb348017a9fc5a06.png', N'COMPONENT', 9),
+        (54, N'THNS-1075946531', N'RAM PC OCPC XT II Black 8GB DDR4 | (1x8GB), 3200MHz, CL16, Intel XMP 2.0 (MMX8GD432C16U)', 1290000, 20, N'https://cdn.hstatic.net/products/200000420363/r4.8g.3200.ocpc.xt.ii.bl_edd83c67740943ac878c05eed6d22d0a.png', N'COMPONENT', 10),
+        (55, N'THNS-1074536615', N'RAM PC VSP 16GB DDR5 | (1x16GB), 4800MHz, CL40, Không tản nhiệt, Intel Only', 4390000, 20, N'https://cdn.hstatic.net/products/200000420363/i_xu_ng_-_2026-05-12t083526.425_efefd5c3e8b646c9b3174e18bd6c9dfb_large_665b84abaa4249bda7683828227b6ca8.png', N'COMPONENT', 10),
+        (56, N'THNS-1075711115', N'RAM PC VSP 8GB DDR4 3200MHz (P/N DD04-8GDDR40173) | UDIMM, CL18, Tản nhiệt nhôm, Đen', 1270000, 20, N'https://cdn.hstatic.net/products/200000420363/r4.8g.3200.vsp.tn4_ffd923235acc4dad895de809537a69f6.png', N'COMPONENT', 10),
+        (57, N'THNS-1071791277', N'RAM PC Kingmax Blade X 8GB DDR4 | (1x8GB), 3200MHz, Intel/AMD KM-LD4A-3200-08GSBK18', 1650000, 20, N'https://cdn.hstatic.net/products/200000420363/t_i_xu_ng_-_2025-12-06t083047.868_54c95cdeebf24a9f825cf98eb426bd18.jpg', N'COMPONENT', 10),
+        (58, N'THNS-1076752302', N'RAM PC VSP 8GB DDR4 3200MHz Tản Nhiệt Nhôm CL22 (DDR4-8GNDDR0188)', 1270000, 20, N'https://cdn.hstatic.net/products/200000420363/r4.8g.3200.vsp.tn.cl22_caa311bd50b34d11a00ab1d489659fdb.jpg', N'COMPONENT', 10),
+        (59, N'THNS-1073789312', N'RAM PC Corsair Vengeance 8GB DDR5 (CMK8GX5M1B5200C40) | (1x8GB), 5200MHz', 3290000, 20, N'https://cdn.hstatic.net/products/200000420363/t_i_xu_ng__10__6715af0bd22b45e2a9a9ecd33cac8d33.png', N'COMPONENT', 10),
+        (60, N'THNS-1047132519', N'RAM PC Patriot Signature Line 8GB DDR4 | (1x8GB), 3200MHz, Intel/AMD PSP48G320081H1', 1450000, 20, N'https://product.hstatic.net/200000420363/product/2_39c87a4826734981b1a2a34bb5bdb907.jpg', N'COMPONENT', 10),
+        (61, N'THNS-1070055204', N'RAM Laptop SSTC 8GB DDR4 | (1x8GB), 3200MHz', 1690000, 20, N'https://cdn.hstatic.net/products/200000420363/8_550dfa32aeb14210b504befd90e4037b.png', N'COMPONENT', 10),
+        (62, N'THNS-1077099759', N'RAM PC Silicon Power 8GB DDR4 3200MHz UDIMM (90WK0000-MMR100) (SP008GBLFU320B02LF) | 1x8GB, 1.2V, CL22', 1190000, 20, N'https://cdn.hstatic.net/products/200000420363/r4.8g.3200.sp_85d6aea2c0d0481f8d2658fdde58370d.jpg', N'COMPONENT', 10),
+        (63, N'THNS-1075707488', N'RAM PC TeamGroup Elite Plus 8GB DDR4 3200MHz | (1x8GB), CL22, Tản nhiệt nhôm', 1490000, 20, N'https://cdn.hstatic.net/products/200000420363/r4.8g.3200.te.elite.pl1_8779749ee132443abe1802dcf2c50a7b.png', N'COMPONENT', 10),
+        (64, N'THNS-1076074440', N'Ổ cứng SSD Faspeed K7 128GB SATA (K7-128G-CD) | 2.5 inch, SATA III, 550MB/s', 499000, 20, N'https://cdn.hstatic.net/products/200000420363/2880-ssd-faspeed-60gb_f35d4be02e6b476fb8be5b50235bc3ba.png', N'COMPONENT', 11),
+        (65, N'THNS-1040780361', N'Ổ cứng SSD Patriot P300 512GB | PCIe Gen3 x4 NVMe, M.2 2280 (P300P512GM28)', 2290000, 20, N'https://product.hstatic.net/200000420363/product/1_0d6d3f6b70614bc1a7c53cc1ad0311b9.jpg', N'COMPONENT', 11),
+        (66, N'THNS-1073363842', N'Ổ cứng SSD Apacer AS2280P4 256GB | PCIe Gen3 x4 NVMe, M.2 2280 (AP256GAS2280P4-1)', 1350000, 20, N'https://cdn.hstatic.net/products/200000420363/250-27533-ssd-apacer-as2280p4-51__1__709d5690e5b144f18fab534044d52502.png', N'COMPONENT', 11),
+        (67, N'THNS-1075797788', N'Ổ cứng SSD OCPC XTL-200 256GB (SSD25S3T256GLT) | SATA III, 2.5 inch, Đọc 500MB/s, Ghi 420MB/s', 850000, 20, N'https://cdn.hstatic.net/products/200000420363/ss.256.ocpc.xtl-200_0e5e350f6b8b404897e08130ee754724.png', N'COMPONENT', 11),
+        (68, N'THNS-1074344794', N'Ổ cứng SSD SSTC M100 256GB | SATA III, 2.5"', 850000, 20, N'https://cdn.hstatic.net/products/200000420363/t_i_xu_ng_-_2026-04-29t144747.858_519865eaa2f342a3a4e363b5955ff29b.jpg', N'COMPONENT', 11),
+        (69, N'THNS-1040779843', N'Ổ Cứng SSD 480G Kingmax SMV32 Sata III (KM480GSMV32)', 1790000, 20, N'https://product.hstatic.net/200000420363/product/11_10dad6b62e8440959f9727680069f817.jpg', N'COMPONENT', 11),
+        (70, N'THNS-1050166389', N'Ổ cứng SSD ADATA SU650 256GB | SATA III, 2.5"', 990000, 20, N'https://product.hstatic.net/200000420363/product/23_p_su650_01_0628_1b004f5d2dfb466095aa68f1caae386b.jpg', N'COMPONENT', 11),
+        (71, N'THNS-1050167898', N'Ổ cứng SSD TeamGroup MP33 512GB | PCIe Gen3 x4 NVMe, M.2 2280 (TM8FP6512G0C101)', 2090000, 20, N'https://product.hstatic.net/200000420363/product/o-cung-ssd-teamgroup-mp33-1tb-pcie-gen3x4-_tm8fp6001t0c101__c625382ea89742e6885c50f333626855.jpg', N'COMPONENT', 11),
+        (72, N'THNS-1065118542', N'Ổ cứng SSD Hiksemi 512GB | PCIe Gen3 x4 NVMe, M.2 2280', 2090000, 20, N'https://cdn.hstatic.net/products/200000420363/snapbg.ai_1767940231136_bf3a636d1e344c09a66ac40ab36d61e9.jpg', N'COMPONENT', 11),
+        (73, N'THNS-1075737171', N'Ổ cứng SSD AGI AI198R 256GB (AGI256G80AI198R-CB) | PCIe Gen3 x4 NVMe, M.2 2280, 3D NAND', 1190000, 20, N'https://cdn.hstatic.net/products/200000420363/ss.256.agi.ai198r_798d05e46bcd4d36ada17e4b72a9ca59.png', N'COMPONENT', 11),
+        (74, N'THNS-1036951881', N'Ổ cứng HDD Seagate BarraCuda 2 TB | SATA III, 3.5" (ST2000DM008)', 3790000, 20, N'https://cdn.hstatic.net/products/200000420363/seagate-brc-2tb-2_cab2768d00044a15beb006d5dc6eff67_large_981a6068d35b4a0f968ce072ffe22a45.jpg', N'COMPONENT', 12),
+        (75, N'THNS-1036951874', N'Ổ cứng HDD Seagate BarraCuda 4TB | SATA III, 3.5" (ST4000DM004)', 4599000, 20, N'https://product.hstatic.net/200000420363/product/sg-brc-004-2_f2052d2db47543999ccfbefc743a154e.jpg', N'COMPONENT', 12),
+        (76, N'THNS-1040779821', N'Ổ cứng HDD Western Digital Blue 2 TB | SATA III, 3.5" (WD20EZBX)', 3850000, 20, N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_09b406ce89aa4bafa21f1343f7979a2b.png', N'COMPONENT', 12),
+        (77, N'THNS-1075186625', N'Ổ cứng HDD 4TB Seagate Ironwolf NAS SATA III (ST4000VN006) | 5400RPM, 256MB Cache, 3.5 inch', 5790000, 20, N'https://cdn.hstatic.net/products/200000420363/st4000vn006_1c7b4da86b344a5ca39e4de21ccc299b.png', N'COMPONENT', 12),
+        (78, N'THNS-1075186624', N'Ổ cứng HDD 2TB Seagate Ironwolf NAS SATA III (ST2000VN003) | 5400RPM, 256MB, 3.5 inch', 4890000, 20, N'https://cdn.hstatic.net/products/200000420363/h.2t.sg.st2000vn003_acf0c7f00e5e408e8766992c38210997.png', N'COMPONENT', 12),
+        (79, N'THNS-1047452667', N'Nguồn máy tính Jetek J Series 750W (ST750 ATX 12V PFC) | Non Modular, ATX', 799000, 20, N'https://product.hstatic.net/200000420363/product/3_2807ba5d960145b7a00855d9f0851003.jpeg', N'COMPONENT', 13),
+        (80, N'THNS-1074771647', N'Nguồn máy tính Antec Atom ZEN 450 (230V AC) (V1000N712GC-22) | 450W, 120mm Silent Fan, Đen', 579000, 20, N'https://cdn.hstatic.net/products/200000420363/p.at.atom.zen.4505_copy_31b48bad1d1d4d928b052fd0190afb94.jpg', N'COMPONENT', 13),
+        (81, N'THNS-1076589514', N'Thùng máy Star Office CS600 | Micro-ATX/Mini-ITX, USB 3.0, Kèm Sẵn 1 Fan 90mm, Thép 0.8mm, Đen', 439000, 20, N'https://cdn.hstatic.net/products/200000420363/ca.star.cs600.black_2dbcc7daf2df4476b3cce93e3ded610a.jpg', N'COMPONENT', 14),
+        (82, N'THNS-1072070092', N'Thùng máy Gaming LinkTech Bahamut M 4F M-ATX (Kèm Sẵn 4 Fan Fixed RGB) - Đen', 539000, 20, N'https://cdn.hstatic.net/products/200000420363/bahamut-m__1__copy_4375aaa5dfbf416599088e094411c385.jpg', N'COMPONENT', 14),
+        (83, N'THNS-1064365486', N'Thùng máy Sama A302', 299000, 20, N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_9e09081ee49b427e9bfd0328d5d63938.png', N'COMPONENT', 14),
+        (84, N'THNS-1054584091', N'Thùng máy NZXT H210i - Đen trắng | Mini ITX, nhập khẩu (CA-H210i-W1)', 1399000, 20, N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_e25225cc8a334f8ca46aef143e083773.png', N'COMPONENT', 14),
+        (85, N'THNS-1036949991', N'Thùng máy Xigmatek XA-22 (EN47567) | Không Fan', 289000, 20, N'https://product.hstatic.net/200000420363/product/ca_xmt_xa22_82363b655a3d47988576e9dd081aff61.jpg', N'COMPONENT', 14),
+        (86, N'THNS-1072582820', N'Thùng máy Magic M-07 (M-ATX, ITX)', 225000, 20, N'https://cdn.hstatic.net/products/200000420363/snapbg.ai_1768527645694_357640729fda488db280df0f805224ec.jpg', N'COMPONENT', 14),
+        (87, N'THNS-1062472524', N'Thùng máy Antec C3 Basic ATX | Không kèm fan, hồ cá, màu đen', 849000, 20, N'https://product.hstatic.net/200000420363/product/tinhocngoisao.com1__4__546a03879c4d4ce28e6a25b138f00272.jpg', N'COMPONENT', 14),
+        (88, N'THNS-1076607525', N'Thùng máy Xigmatek Dynamic ML M-ATX (Không Kèm Fan) (EN91134) | Micro-ATX, Mini-ITX, GPU 410mm, Đen', 599000, 20, N'https://cdn.hstatic.net/products/200000420363/ca.xmt.dynamic.ml.black_415538eb034b4d8faa6fa06784c3a817.png', N'COMPONENT', 14),
+        (89, N'THNS-1051536556', N'Thùng máy MIK Morax 3FA - Đen', 729000, 20, N'https://product.hstatic.net/200000420363/product/thung-may-case-mik-morax-3fa-b-3_dc8dd8819e98466c920e2cee0ee1197c.jpg', N'COMPONENT', 14),
+        (90, N'THNS-1042470721', N'Tản Nhiệt Linh kiện CPU Intel 12Th Socket 1700', 145000, 20, N'https://cdn.hstatic.net/products/200000420363/95162605695373948_8995162605695373948_62326f6acdf26a35868d9e7573b984ba_6ad4f4a7cc054ae7824e82b06ef1047a.png', N'COMPONENT', 15),
+        (91, N'THNS-1036953689', N'Tản nhiệt khí Leopard A220 | RGB, Đen', 115000, 20, N'https://cdn.hstatic.net/products/200000420363/t_i_xu_ng_-_2025-12-11t140718.858_70b7de88da434dbdae3760e516982bbd.jpg', N'COMPONENT', 15),
+        (92, N'THNS-1055609408', N'Tản nhiệt khí Leopard K400 Black | RGB, Đen', 269000, 20, N'https://product.hstatic.net/200000420363/product/k4002_ce43fc0bc3f64df0a8c703291ed9cec0.png', N'COMPONENT', 15),
+        (93, N'THNS-1047042338', N'Tản nhiệt khí Jonsbo CR-1000 EVO | RGB, Đen', 359000, 20, N'https://product.hstatic.net/200000420363/product/tan-nhiet-cpu-jonsbo-cr-1000-evo-rgb_fc65c36d565c461ab80cc7ddc2964c14.jpg', N'COMPONENT', 15),
+        (94, N'THNS-1067006661', N'Tản nhiệt khí Leopard K400 Pro | RGB, Đen', 339000, 20, N'https://product.hstatic.net/200000420363/product/tan-nhiet-khi-jungle-leopard-k400-pro-black-3_3e9c1bc21be447aca368a89d592dd4b7.png', N'COMPONENT', 15),
+        (95, N'THNS-1036954057', N'Tản nhiệt khí Jonsbo CR-1200 | RGB, Đen', 189000, 20, N'https://product.hstatic.net/200000420363/product/1_93e06f9aea44419896b00a85dac5a310.jpg', N'COMPONENT', 15),
+        (96, N'THNS-1065099770', N'Tản nhiệt khí Leopard K420E Digital Black | ARGB Display, Đen', 399000, 20, N'https://product.hstatic.net/200000420363/product/tinhocngoisao.com1_b365d9c33daf49b5818cbdfd59e51992.png', N'COMPONENT', 15),
+        (97, N'THNS-1051114701', N'Tản nhiệt khí Thermalright Assassin King 120 SE Black | Đen', 469000, 20, N'https://product.hstatic.net/200000420363/product/1-2_f01951fd600442639efe6e3cc6f67c41.jpg', N'COMPONENT', 15),
+        (98, N'THNS-1052824050', N'Tản nhiệt nước Leopard TK1 240 | RGB, Đen', 639000, 20, N'https://cdn.hstatic.net/products/200000420363/snapbg.ai_1775288137486_b738126ba6ed4ce8837e6cfee8f80f08.png', N'COMPONENT', 16),
+        (99, N'THNS-1055609203', N'Tản nhiệt nước Leopard AstroBeat 360 Black | ARGB Display, Đen', 1499000, 20, N'https://cdn.hstatic.net/products/200000420363/snapbg.ai_1775288989197_f0dffa2078084ae6ab395b9d7c1ea76f.png', N'COMPONENT', 16),
+        (100, N'THNS-1052824048', N'Tản nhiệt nước Leopard TK1 240 | RGB, Trắng', 649000, 20, N'https://product.hstatic.net/200000420363/product/tan-nhiet-nuoc-leopard-tk1-5_c0e905d301894087a69ca16652bbfc4f.jpg', N'COMPONENT', 16),
+        (101, N'THNS-1051796772', N'Tản nhiệt nước Thermalright Frozen Warframe 240 White | ARGB Display, Trắng', 1699000, 20, N'https://product.hstatic.net/200000420363/product/1-2__2__db7b9b02ac8d49878dadbf47dac94b23.jpg', N'COMPONENT', 16),
+        (102, N'THNS-1051796773', N'Tản nhiệt nước Thermalright Frozen Warframe 240 Black | ARGB Display, Đen', 1659000, 20, N'https://product.hstatic.net/200000420363/product/1-3__3__69228c3142074e1492e4aabdeffc7dd5.jpg', N'COMPONENT', 16),
+        (103, N'THNS-1055889029', N'Tản nhiệt nước Thermalright Frozen Infinity 240 Black | ARGB, Đen', 1249000, 20, N'https://product.hstatic.net/200000420363/product/1-2_52c30d080b1d49f28f12640bc7c60442.jpg', N'COMPONENT', 16),
+        (104, N'THNS-1055889152', N'Tản nhiệt nước Thermalright Frozen Infinity 360 Black | ARGB, Đen', 1499000, 20, N'https://product.hstatic.net/200000420363/product/1_57219a70085447e98e56051c2587166f.jpg', N'COMPONENT', 16),
+        (105, N'THNS-1053600979', N'Tản nhiệt nước Thermalright Aqua Elite 360 V3 Black | ARGB, Đen', 1399000, 20, N'https://product.hstatic.net/200000420363/product/1-2_fd50269a247644e1b50f466cb3008cd1.jpg', N'COMPONENT', 16),
+        (106, N'THNS-1053600978', N'Tản nhiệt nước Thermalright Aqua Elite 240 V3 Black | ARGB, Đen', 1089000, 20, N'https://product.hstatic.net/200000420363/product/1-3_c25b4bf6068d43e48149309f0c03b42f.jpg', N'COMPONENT', 16),
+        (107, N'THNS-1051557124', N'Tản nhiệt nước Thermalright Frozen Warframe 360 Black | ARGB Display, Đen', 2249000, 20, N'https://product.hstatic.net/200000420363/product/1-8__1__fd57cb86aee44bd286e5ed0bce87a5aa.jpg', N'COMPONENT', 16),
+        (108, N'THNS-1076590001', N'Quạt tản nhiệt PC OEM A1225L 12S | 120mm, Không LED, Hiệu năng cao, Khung lưới bảo vệ, 4Pin PWM, Đen', 59000, 20, N'https://cdn.hstatic.net/products/200000420363/f.ca.a1225l.12s.black3_bb01658abfd24be0b13124dde8038833.png', N'COMPONENT', 17),
+        (109, N'THNS-1053229105', N'Quạt tản nhiệt PC Leopard 6Pro | Fan lẻ 120mm, ARGB, Gió thuận, Đen', 109000, 20, N'https://product.hstatic.net/200000420363/product/fan-case-leopard-f6-pro-argb-4_6df61ed85c564da883e6ec6653de874d.jpg', N'COMPONENT', 17),
+        (110, N'THNS-1064629008', N'Quạt tản nhiệt PC Leopard S1 Auto | Fan lẻ 120mm, ARGB, Gió ngược, Đen', 69000, 20, N'https://product.hstatic.net/200000420363/product/tinhocngoisao.com1__8__06c39480eb3740dcb0ee4ddc1e721ca2.png', N'COMPONENT', 17),
+        (111, N'THNS-1076265362', N'Quạt tản nhiệt PC Jungle Leopard F8 V3 Black | 2000RPM, 4Pin PWM Có Điều Tốc, Không LED, Đen', 89000, 20, N'https://cdn.hstatic.net/products/200000420363/f.ca.lp.f8.v3.black_28c4cc0d47854b7489925c31986e74a9.png', N'COMPONENT', 17),
+        (112, N'THNS-1053364074', N'Quạt tản nhiệt PC Leopard 6Pro | Fan lẻ 120mm, ARGB, Gió ngược, Đen', 112000, 20, N'https://product.hstatic.net/200000420363/product/fan-case-leopard-f6-pro-argb-4_dc873f268b564764afb04106d2ec15a9.jpg', N'COMPONENT', 17),
+        (113, N'THNS-1075851146', N'Màn hình Văn phòng Dahua DHI-LM24-A221Y | 24 inch, Full HD, IPS, 144Hz', 1690000, 20, N'https://cdn.hstatic.net/products/200000420363/l.24.dh.dhi-lm24-a221y_f2d30a222d1048f2972dcff7f5a0e593.png', N'COMPONENT', 18),
+        (114, N'THNS-1053519079', N'Màn hình Gaming VSP IP2736G | 27 inch, FHD, 360Hz, IPS', 3290000, 20, N'https://cdn.hstatic.net/products/200000420363/t_i_xu_ng__82__89966abf327240169922b2d8d19511bb_large_a962f017d0444e87b643d2258658e180.png', N'COMPONENT', 18),
+        (115, N'THNS-1075971913', N'Màn hình Gaming 2K MSI MPG 275CQRXF | 27 inch, WQHD, Rapid VA, 240Hz, USB-C PD 98W, Chân CTH', 4950000, 20, N'https://cdn.hstatic.net/products/200000420363/l.27.msi.2k.mpg275cqrxf_b406312312574e56a75790f9ddc59b15.png', N'COMPONENT', 18),
+        (116, N'THNS-1074968029', N'Màn hình Gaming 2K VSP Aivision AG2714QS1 | 27 inch, QHD, 144Hz, IPS, 1ms | LH tư vấn trước khi lắp Arm (giá treo)', 2890000, 20, N'https://cdn.hstatic.net/products/200000420363/l.27.avs.2k.ag2714qs1_50bfccd94ec44424ac80947983dcb375.jpg', N'COMPONENT', 18),
+        (117, N'THNS-1074328123', N'Màn hình Văn phòng Dahua DHI-LM22-A211Y | 21.45 inch, FHD, 120Hz, IPS, HDMI/VGA', 1390000, 20, N'https://cdn.hstatic.net/products/200000420363/l.22.dh.lm22-a211y_c3dbf7f555264fcab8ecde16dc0de240.png', N'COMPONENT', 18),
+        (118, N'THNS-1074968028', N'Màn hình Gaming 2K VSP Aivision AG2414QS1 | 24 inch, QHD, 144Hz, IPS, 1ms', 2490000, 20, N'https://cdn.hstatic.net/products/200000420363/l.24.avs.2k.ag2414qs1_fd4cf2e9d7f047cf98644a280186c2ee.jpg', N'COMPONENT', 18),
+        (119, N'THNS-1036952455', N'Bàn phím giả cơ văn phòng Logitech K120 | Có dây, Fullsize, Black', 158000, 20, N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_f8f19e7ee21e42e7a37fe9bfef0907c1.png', N'COMPONENT', 19),
+        (120, N'THNS-1036952460', N'Combo phím chuột văn phòng Logitech MK120 | Có dây, Fullsize, Black', 229000, 20, N'https://product.hstatic.net/200000420363/product/combo_phim_chuot_logitech_mk120_-__den__51c424ada06e4d0c83ea9043d276888c.png', N'COMPONENT', 19),
+        (121, N'THNS-1066113068', N'Bàn phím văn phòng Motospeed K103 | Có dây, Fullsize, Black', 129000, 20, N'https://cdn.hstatic.net/products/200000420363/tinhocngoisao.com1_338289071cfa4_c805e0b1be63450e8900cdda0ef62750.png', N'COMPONENT', 19),
+        (122, N'THNS-1076784516', N'Bàn Phím Cơ Gaming Không Dây Rapoo V500 Pro-87 Multi Mode Wireless | 3 Mode, Red Switch, LED 6 màu', 859000, 20, N'https://cdn.hstatic.net/products/200000420363/kb.rp.v500.pro.87.res5_9b52e10e7e874869b561661b707e6b7e.png', N'COMPONENT', 19),
+        (123, N'THNS-1075470741', N'Combo bàn phím chuột giả cơ Gaming Shipadoo D500 | Có dây USB, LED Rainbow, 1000 DPI, Đen', 249000, 20, N'https://cdn.hstatic.net/products/200000420363/gemini_generated_image_tpxd16tpxd16tpxd_15469cadc66b4be5acfd4ac53cd4892e.png', N'COMPONENT', 19),
+        (124, N'THNS-1036952426', N'Bàn phím giả cơ văn phòng Dareu LK185 | Có dây, Fullsize, Black', 119000, 20, N'https://product.hstatic.net/200000420363/product/kb_du_lk185_74f5d5d561da4b5693a6824d010c0d32.jpg', N'COMPONENT', 19),
+        (125, N'THNS-1036952249', N'Chuột văn phòng Logitech B100 | Có dây, 800 DPI, 80g, Đen', 78000, 20, N'https://cdn.hstatic.net/products/200000420363/t_i_xu_ng_-_2026-01-27t101310.215_90852a456f1b40c8a1cc88396d70704f.png', N'COMPONENT', 20),
+        (126, N'THNS-1036952123', N'Chuột gaming Logitech G102 Gen II Lightsync | Có dây, 8000 DPI, 85g, RGB, Đen', 379000, 20, N'https://product.hstatic.net/200000420363/product/1_953b62f3b78d4ad8931916a08438eaca.jpg', N'COMPONENT', 20),
+        (127, N'THNS-1066113123', N'Chuột văn phòng Motospeed F333 | Có dây, 1000 DPI, 90g, Đen', 79000, 20, N'https://cdn.hstatic.net/products/200000420363/chatgpt_image_10_07_32_27_thg_1__2026_4c6dd2a89c4f4e4d906517adb6f939c9.png', N'COMPONENT', 20),
+        (128, N'THNS-1036952252', N'Chuột văn phòng DareU LM106G | Wireless 2.4Ghz, 1200 DPI, 65g, Đen', 89000, 20, N'https://cdn.hstatic.net/products/200000420363/download__4__b5726c18f2ec4233a09543a06e28b087.png', N'COMPONENT', 20),
+        (129, N'THNS-1036952248', N'Chuột văn phòng Logitech B175 | Wireless 2.4Ghz, 1000 DPI, 90g, Đen', 163000, 20, N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_90b8854a35804dd294f3f6007ce3c2d4.png', N'COMPONENT', 20),
+        (130, N'THNS-1077277567', N'Chuột Gaming Không Dây Dare-U EM910G | Triple Mode, 12000 DPI, Màu Đen, 59g', 389000, 20, N'https://cdn.hstatic.net/products/200000420363/mo.du.em910g.de_4cb81a7c8e5c439ab45209576b3ffb69.png', N'COMPONENT', 20),
+        (131, N'THNS-1067224282', N'Loa máy tính USB 2.0 Kisonli V410 - Black', 79000, 20, N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_42e32d6d71944c1fb5d53524385a1bc5.png', N'COMPONENT', 21),
+        (132, N'THNS-1064323830', N'Loa kiểm âm Edifier MR3 - Trắng', 1690000, 20, N'https://cdn.hstatic.net/products/200000420363/download__60__49b907d029af48e2bb5d34ef88292c7f.png', N'COMPONENT', 21),
+        (133, N'THNS-1067224139', N'Loa máy tính USB 2.0 Kisonli L-1040 - Pink', 99000, 20, N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_dc407a8f669b4d759bea2ecf1df19aee.png', N'COMPONENT', 21),
+        (134, N'THNS-1051735788', N'Loa Bluetooth Edifier R1080BT - Black', 1750000, 20, N'https://product.hstatic.net/200000420363/product/loa-bluetooth-edifier-r1080bt---black_5405602765144ddb8895783815942c5f.jpg', N'COMPONENT', 21),
+        (135, N'THNS-1069308506', N'Loa Soundbar Thonet & Vander Dunn Gen 2 | Bluetooth 5.3, màu đen', 1990000, 20, N'https://cdn.hstatic.net/products/200000420363/_new_-_nh-sp-web_75906f7baffd4a13b427910160197729.png', N'COMPONENT', 21),
+        (136, N'THNS-1050253531', N'Tai Nghe Xiberia Q4 Gaming | Đen, RGB, Virtual 7.1, OverEar', 349000, 20, N'https://product.hstatic.net/200000420363/product/tai-nghe-xiberia-q4-virtual-7.1-2_f878fca850c54308ac1ee495a0f669d8.jpg', N'COMPONENT', 22),
+        (137, N'THNS-1057141230', N'Tai nghe Gaming Dare-U Eh925L 7.1 | Có dây, Over-ear, RGB, Đen', 635000, 20, N'https://product.hstatic.net/200000420363/product/tai-nghe-dare-u-eh925l-rgb-7.1_1f171c353bd946a5972018e00c6e606f.png', N'COMPONENT', 22),
+        (138, N'THNS-1062105160', N'Tai nghe Gaming DareU EH722X Pro | Có dây, Over-ear, RGB, Đen', 499000, 20, N'https://cdn.hstatic.net/products/200000420363/tinhocngoisao.com1__6__42fba73c35e04789a57b4eaa391a4362_large_133fb1bfb6bb41fdbb107367f65220db.png', N'COMPONENT', 22),
+        (139, N'THNS-1036952543', N'Tai nghe Gaming Xiberia V15 7.1 | Có dây, Over-ear, RGB, Đen', 370000, 20, N'https://product.hstatic.net/200000420363/product/xiberia-v15-1_4fbac545932b4e0699400ba52ff5b0bf.jpg', N'COMPONENT', 22),
+        (140, N'THNS-1036952505', N'Tai nghe Gaming Dare-U EH416 7.1 | Có dây, Over Ear, RGB, Đen', 349000, 20, N'https://product.hstatic.net/200000420363/product/hp_du_eh416_rgb-600x600_759e38e805044c3882cdda7f45902bef.jpg', N'COMPONENT', 22),
+        (141, N'THNS-1036953244', N'Webcam VSP AI HD-2K FullHD', 339000, 20, N'https://product.hstatic.net/200000420363/product/wc_ai_hd-2k-7_9b87ad62330740abbf338c234674a2d6.jpg', N'COMPONENT', 23),
+        (142, N'THNS-1036953247', N'Webcam VSP W66/W-R FullHD', 559000, 20, N'https://cdn.hstatic.net/products/200000420363/download__73__74d574a6127a4d11b8d8a266f929da3c.png', N'COMPONENT', 23),
+        (143, N'THNS-1036953246', N'Webcam VSP W66/W FullHD', 459000, 20, N'https://cdn.hstatic.net/products/200000420363/wc_ai_w66-r-2_fbeb7e353ed6426baaea27a93dc925dc_large__1__283f4a95f1834ed2bf53c87d7f75162d.png', N'COMPONENT', 23),
+        (144, N'THNS-1038111669', N'Webcam Logitech C270 HD', 399000, 20, N'https://product.hstatic.net/200000420363/product/wc-lgt-c270-3-new_f58aa5f99ec64a599d474807f8321b49.jpg', N'COMPONENT', 23),
+        (145, N'THNS-1055824628', N'Webcam Logitech Brio 100 Đen Full HD (960-001587)', 690000, 20, N'https://cdn.hstatic.net/products/200000420363/download__71__af42ae89c810486db06c988da719c449.png', N'COMPONENT', 23),
+        (146, N'THNS-1066195776', N'Webcam Logitech Brio 100 Trắng Full HD (960-001618)', 690000, 20, N'https://cdn.hstatic.net/products/200000420363/download__72__33a493a7d5b34a54a8ce921a03bbc4c2.png', N'COMPONENT', 23),
+        (147, N'THNS-1069217656', N'Giá treo màn hình VSP VG60-1 - Đen xám | 17 - 42 inch, chân đế RGB, nút chỉnh LED, cổng USB 3.0 & Type C', 690000, 20, N'https://cdn.hstatic.net/products/200000420363/_new_-_nh-sp-web_408ead395fc14f099f6a90da162897e8.png', N'COMPONENT', 25),
+        (148, N'THNS-1074371201', N'Giá treo màn hình North Bayou A5 Gaming Version 2026 | Chân đơn, 17-32 inch, Đen', 289000, 20, N'https://cdn.hstatic.net/products/200000420363/z7789489718059_070b086539c91cdee7672a8978a044ef_e95c4b90186c45a3af67d7feb34d8459.jpg', N'COMPONENT', 25),
+        (149, N'THNS-1071863318', N'Giá Treo LCD Northbayou F80 17- 32 inch, New Version 2026, Màu Xám', 329000, 20, N'https://cdn.hstatic.net/products/200000420363/17---30-inch_f1fce57c42e84810ae2497299a585cd3_large_0f25f1d215454fd8bbd95007394c9995.png', N'COMPONENT', 25),
+        (150, N'THNS-1072760455', N'Giá Treo LCD Northbayou F80-XE 17"-32" | New Version 2026, Màu Trắng (EG)', 299000, 20, N'https://cdn.hstatic.net/products/200000420363/z7759179763669_14c277d310922023ffc9e61392d1f2d3_copy_32f4c966c058490c82f472cad71008ad.jpg', N'COMPONENT', 25),
+        (151, N'THNS-1074371202', N'Giá treo màn hình North Bayou A5-XS Gaming Version 2026 | Chân đơn, 17-32 inch, Bạc', 295000, 20, N'https://cdn.hstatic.net/products/200000420363/logoremover_1777883017368_5a87819eb30e4c4da8cc489171ee9cbb.jpeg', N'COMPONENT', 25),
+        (152, N'THNS-1074371203', N'Giá treo màn hình North Bayou A5-C Gaming Version 2026 | Chân đôi, 17-32 inch, Đen', 549000, 20, N'https://cdn.hstatic.net/products/200000420363/a5c_-_1_b88617faec4347d5ab799e44947ce3a7.jpeg', N'COMPONENT', 25),
+        (153, N'THNS-1036950186', N'Nguồn máy tính MSI MAG A650BN 650W 80 Plus Bronze MAG-A650BN', 1150000, 20, N'https://www.nguyencongpc.vn/media/product/21184-msi-mag-a650bn-650w-80-plus-bronze.jpg', N'COMPONENT', 13),
+        (154, N'NCPC-24829', N'Tản nhiệt khí CPU Deepcool AK400', 690000, 20, N'https://www.nguyencongpc.vn/media/product/24829-t---n-nhi---t-kh---cpu-deepcool-ak400.jpg', N'COMPONENT', 15),
+        (155, N'NCPC-23609', N'Ổ cứng SSD Kingston NV2 1TB PCIe 4.0 x4 NVMe M.2 (SNV2S/1000G)', 1000000, 20, N'https://www.nguyencongpc.vn/media/product/23609---dasd.jpg', N'COMPONENT', 11),
+        (156, N'NCPC-23037', N'Micro Razer Seiren X Quartz Pink Edition', 2890000, 20, N'https://nguyencongpc.vn/media/product/23037-micro-h---ng-4.jpg', N'COMPONENT', 24),
+        (157, N'NCPC-24065', N'Bộ PC Đồ Họa 2D Intel Core i5-12400F, Ram 16GB, VGA Intel A380 6GB [TẶNG MÀN HÌNH]', 16020000, 20, N'https://www.nguyencongpc.vn/media/product/24065-pc-do-hoa-a380.jpg', N'PREBUILT_PC', 6);
+
+    INSERT INTO #source_seed (product_id, source_url, image_url, captured_on, price_status, stock_status, note) VALUES
+        (1, N'https://tinhocngoisao.com/products/pc-gaming-star-yasuo-intel-i5-12400f-rtx-3050-6g-h610m-ram-16gb-ssd-500gb', N'https://cdn.hstatic.net/products/200000420363/03bbac5e-ad97-4c64-83e7-aa48d10e947c_316ba5f560a747839af2cc79756104a7.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (2, N'https://tinhocngoisao.com/products/pc-storm-e-intel-core-i3-12100f-ram-16gb-ssd-512-rtx-3050', N'https://cdn.hstatic.net/products/200000420363/03bbac5e-ad97-4c64-83e7-aa48d10e947c_74896d2ba28d4df080ea3ce49ff89967.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (3, N'https://tinhocngoisao.com/products/pc-gaming-star-cypher-intel-i3-12100f-rtx-3050-6g-h610m-ram-16gb-ssd-512gb-1', N'https://cdn.hstatic.net/products/200000420363/03bbac5e-ad97-4c64-83e7-aa48d10e947c_8b793d288a014ec0bbaaaf7f58aaedb2.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (4, N'https://tinhocngoisao.com/products/pc-star-hunt-e-amd-ryzen-5-5500-b450m-ram-16gb-ssd-512gb-rx-6500-xt', N'https://cdn.hstatic.net/products/200000420363/03bbac5e-ad97-4c64-83e7-aa48d10e947c_10caa3824ccd49b9b0a026f2ab3cdf63.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (5, N'https://tinhocngoisao.com/products/pc-van-phong-starpc-office-5-amd-ryzen-5-5500gt-ram-8gb-ssd-512gb-win-11-pro', N'https://cdn.hstatic.net/products/200000420363/starpc_office_5_amd_ryzen_5_5500gt-_ram_8gb-_ssd_512gb-_win_11_pro__1__d59fcd531b7749f5b0b376c1c467000e.webp', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (6, N'https://tinhocngoisao.com/products/pc-van-phong-starpc-office-3-starpc-office-5-amd-ryzen-5-3400g-ram-8gb-ssd-512gb-win-11-pro', N'https://cdn.hstatic.net/products/200000420363/_office_5_amd_ryzen_5_3400g_ram_8gb__ssd_512gb__win_11_pro__1__9a0aa9f00d5447cb97c82fdde2712701.webp', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (7, N'https://tinhocngoisao.com/products/pc-van-phong-starpc-office-3-starpc-office-5-intel-core-i5-14400-ram-8gb-ssd-512gb-wi-fi-win-11-pro', N'https://cdn.hstatic.net/products/200000420363/ffice_5_intel_core_i5_14400-_ram_8gb-_ssd_512gb-_wi-fi-_win_11_pro__1__95a14b7b90184b9299e8621f00194a85.webp', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (8, N'https://tinhocngoisao.com/products/pc-van-phong-starpc-office-3-intel-core-i3-14100-ram-8gb-ssd-512gb-wi-fi-win-11-pro', N'https://cdn.hstatic.net/products/200000420363/c__starpc_office_3__ryzen_3_3200g__8gb_ram__256gb_ssd__win_11_pro___1__463185f9e7694b50a5ad0e1cb3aae142.webp', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (9, N'https://tinhocngoisao.com/products/cpu-intel-core-i5-12400f-box-chinh-hang-2-50-up-to-4-40ghz', N'https://cdn.hstatic.net/products/200000420363/i5-12th_ef60688e685f4affa651f320_95172b46b0e74a3397888cf57ca4ad1e.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (10, N'https://tinhocngoisao.com/products/cpu-intel-core-i3-14100-tray-chinh-hang-no-box', N'https://cdn.hstatic.net/products/200000420363/61741_cpu_intel_core_i3_14100_tr_accd76f565264dd8ac87af3de72e4100.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (11, N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5500gt-3-6-ghz-up-to-4-6-ghz-6-cores-12-threads-am4', N'https://cdn.hstatic.net/products/200000420363/r5-gen-5_027c969098d941bbb045c81_c017c0670464436c979607bb5181c604.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (12, N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5500-up-to-4-2ghz-6-cores-12-threads-box-chinh-hang', N'https://cdn.hstatic.net/products/200000420363/r5-gen-5_f301d9ce73554b68b20b982_af086b7dfe174c41b79149d0ae6f9d31.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (13, N'https://tinhocngoisao.com/products/cpu-intel-core-i3-14100-box-chinh-hang-3-5-ghz-4-cores-8-threads-lga1700', N'https://cdn.hstatic.net/products/200000420363/download__56__2cfce3efafdb4ac2b4622fc5a9875c2d.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (14, N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5600g-3-9ghz-up-to-4-4ghz-am4-6-cores-12-threads-box-chinh-hang', N'https://cdn.hstatic.net/products/200000420363/r5-gen-5_f301d9ce73554b68b20b982_17636c1494bd4e2da4adea11fa38643e.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (15, N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5600x-3-7ghz-up-to-4-6ghz-am4-6-cores-12-threads', N'https://cdn.hstatic.net/products/200000420363/r5-gen-5_027c969098d941bbb045c81_7a054baea0924a0eaa92a21cdefac2c4.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (16, N'https://tinhocngoisao.com/products/cpu-intel-core-i5-14400-tray-chinh-hang-no-box-khong-kem-fan-lga1700-10-nhan-16-luong-cache-20mb-max-turbo-4-7ghz', N'https://cdn.hstatic.net/products/200000420363/i5.14400.tr.ch_1ff50b5130464f5280bd4df19ce194f6.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (17, N'https://tinhocngoisao.com/products/cpu-intel-core-i7-12700-tray-chinh-hang-no-box', N'https://cdn.hstatic.net/products/200000420363/54743_cpu_intel_core_i7_12700__i_6652ee891a7946dfb42d0d3c93a88d1b.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (18, N'https://tinhocngoisao.com/products/cpu-intel-core-i3-13100f-4-cores-8-threads-12mb-up-to-4-5ghz-box-chinh-hang-bx8071513100f', N'https://product.hstatic.net/200000420363/product/i3.13100f.b.ch_dfc1c227e982496d944da7bfd07b209f.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (19, N'https://tinhocngoisao.com/products/cpu-intel-core-i3-12100-tray-chinh-hang-no-box-lga-1700-4-nhan-8-luong-max-4-3ghz', N'https://cdn.hstatic.net/products/200000420363/t_i_xu_ng__7__7782e566d41b49628e6f00cddd07cec7.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (20, N'https://tinhocngoisao.com/products/cpu-intel-core-i9-14900k-chinh-hang-up-to-6-0ghz-24-cores-32-threads', N'https://cdn.hstatic.net/products/200000420363/i9-14th_c146ac75245e4f2ea81513b8_83e9140124ba4052a6f25aecfa2073f3.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (21, N'https://tinhocngoisao.com/products/cpu-intel-core-i5-12400-tray-chinh-hang-no-box', N'https://cdn.hstatic.net/products/200000420363/cpu-intel-core-i5-12400-tray-new_be05e537387f4051a6a776cd258e9f81.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (22, N'https://tinhocngoisao.com/products/cpu-intel-core-i7-14700f-box-chinh-hang-5-4-ghz-20-cores-28-threads-lga1700', N'https://cdn.hstatic.net/products/200000420363/chatgpt_image_09_51_58_9_thg_1__2026_86b262c4dba44c529c8d3d0b001edde9.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (23, N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-f-d4-ddr4-lga-1700-matx-2-khe-ram', N'https://cdn.hstatic.net/products/200000420363/w692__1__copy_a4b6a876a28c4e6ebf47f05bf941be82.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (24, N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-k-ddr4-rev-1-0', N'https://cdn.hstatic.net/products/200000420363/tinhocngoisao.com1__5__535b87fad6ba45bb9ceb4e9e0be23984.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (25, N'https://tinhocngoisao.com/products/mainboard-gigabyte-a520m-k-v2-rev-1-1', N'https://product.hstatic.net/200000420363/product/a520m_k_v2-01_74f2863372b8454da6f06bd334852c68.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (26, N'https://tinhocngoisao.com/products/mainboard-msi-pro-b760m-e-ddr4-intel-b760-socket-1700-matx-2-khe-ddr4', N'https://product.hstatic.net/200000420363/product/pro-b760m-e-ddr4-4_dd45c96a308148408f3631cd4a4442c2.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (27, N'https://tinhocngoisao.com/products/mainboard-asus-h610m-k-prime-ddr4', N'https://cdn.hstatic.net/products/200000420363/40447_4_copy_01b57a934c00479592d6139303b0b6d9.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (28, N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-h-v3-ddr4-rev-1-0', N'https://product.hstatic.net/200000420363/product/h610m_h_v3_ddr4-01_ecca259dc84a497bbcc6c0fb09965f40.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (29, N'https://tinhocngoisao.com/products/mainboard-msi-pro-a520m-s-amd-a520-am4-2-khe-ddr4-pcie-3-0', N'https://cdn.hstatic.net/products/200000420363/m.msi.a520m-s_7c0793b0bc76414fa4fa010920182d5f.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (30, N'https://tinhocngoisao.com/products/mainboard-msi-b450m-a-pro-max-ii', N'https://product.hstatic.net/200000420363/product/1024__8__8b66565bbdfc46bc8da36d631308beff.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (31, N'https://tinhocngoisao.com/products/mainboard-msi-pro-h610m-e-ddr4', N'https://cdn.hstatic.net/products/200000420363/1024__25__copy_6f3dadebd68548f6ace9948b9650e038.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (32, N'https://tinhocngoisao.com/products/mainboard-asrock-520m-ac', N'https://product.hstatic.net/200000420363/product/mainboard-asrock-520m-4_74c46732c8e14c7dac3c89efb0f264d4.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (33, N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-k-v2-ddr4-rev-1-0', N'https://product.hstatic.net/200000420363/product/_nh_d_i_di_n_sp_thns__1000_x_1000_px__69__99047a25972342f1be8af7bed48a6025.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (34, N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-a-d4-csm', N'https://cdn.hstatic.net/products/200000420363/rpw0hdg-w9n0eqoez98odiaoex7zc1tv_72311e3aa06641549f65ee9e7d5d65de.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (35, N'https://tinhocngoisao.com/products/mainboard-colorful-battle-ax-h610m-p-wifi-d5', N'https://cdn.hstatic.net/products/200000420363/1-3_e726293ffd0040d387d1e3ee399e4712.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (36, N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-gaming-plus-wifi-ddr4', N'https://product.hstatic.net/200000420363/product/b760m_gaming_plus_wifi_ddr4-01_a4788a7b49f045c188a6cebd9481ae4a.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (37, N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-k-ddr4', N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_402e7e26fca442c9a79aa7bec5f6a29b.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (38, N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-6g', N'https://product.hstatic.net/200000420363/product/geforce_rtx__3050_windforce_oc_v2_6g-01_614c69be08fb4516846c6291df9c1558.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (39, N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-radeon-rx-6500-xt-oc-edition-dual-rx6500xt-o4g-v2', N'https://product.hstatic.net/200000420363/product/tai_xuong_3644fdcb201747e3a3264c2efdd7dfd4.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (40, N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-8g', N'https://product.hstatic.net/200000420363/product/geforce_rtx__3050_windforce_oc_v2_8g-01_51ae19ffa28a44628f3331fb8a27f693.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (41, N'https://tinhocngoisao.com/products/card-man-hinh-vga-msi-geforce-rtx-3050-ventus-2x-e-6g-oc', N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_ee62b9e69a754aa382521891cda0b1b9.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (42, N'https://tinhocngoisao.com/products/vga-msi-rtx-3060-12g-gddr6-ventus-2x-oc-lhr-geforce-rtx-3060-ventus-2x-12g-oc-lhr', N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_74d1af83fd7f48adb3baf2b2358f2c70.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (43, N'https://tinhocngoisao.com/products/vga-asus-geforce-gt-730-2gb-ddr5-gt730-sl-2gd5-brk', N'https://product.hstatic.net/200000420363/product/1_09006a20467d405d89b553217b63644b.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (44, N'https://tinhocngoisao.com/products/card-man-hinh-msi-geforce-rtx-5060-8g-ventus-2x-oc-v1-8gb-gddr7-3840-cuda-cores-pcie-gen5', N'https://cdn.hstatic.net/products/200000420363/v.5060.8g.msi.ventus2x.oc.v1_7aca4118384e4ea7b02199b20b9f4593.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (45, N'https://tinhocngoisao.com/products/card-man-hinh-gigabyte-geforce-rtx-5060-windforce-oc-8g', N'https://product.hstatic.net/200000420363/product/geforce_rtx__5060_windforce_oc_8g-01_3a2660a6265e4ef7b7b34c9c815afdf4.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (46, N'https://tinhocngoisao.com/products/card-man-hinh-inno3d-geforce-gt-1030-2gb-gddr5-384-cuda-300w', N'https://cdn.hstatic.net/products/200000420363/imgi_24_1030_fanless_n1030-1sdv-e5bl_box-set_0e2ca513219b4cba972969152cb081c9.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (47, N'https://nguyencongpc.vn/card-man-hinh-asus-dual-rtx-3050-6gb', N'https://www.nguyencongpc.vn/media/product/27384-asus-dual-rtx-3050-6gb-gddr6-1.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (48, N'https://tinhocngoisao.com/products/card-man-hinh-amd-asus-dual-rx-9060xt-dual-rx9060xt-16g-16gb-gddr6-2048-stream', N'https://cdn.hstatic.net/products/200000420363/t_i_xu_ng__26__copy_e6d8db967b6b43d9b9c1e1baf8e994b7.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (49, N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-oc-edition-6gb-gddr6-90yv0k60-m0na00', N'https://product.hstatic.net/200000420363/product/tai_xuong__52__7269434c8f80479b858bef5bdd469ac6.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (50, N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-radeon-rx-7600-evo-oc-edition-8gb-gddr6', N'https://product.hstatic.net/200000420363/product/tai_xuong__5__66c0e08f98c043b086147fd470e43eb3.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (51, N'https://tinhocngoisao.com/products/card-man-hinh-vga-zotac-gaming-geforce-rtx-5070-solid-oc', N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_ca31830fb7f5405aa000a2ed7e98fac0.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (52, N'https://tinhocngoisao.com/products/card-man-hinh-zotac-gaming-geforce-rtx-5060-twin-edge-plus-8gb-gddr7-zt-b50600e2-10m-3840-cuda-2497-mhz-2-fan', N'https://cdn.hstatic.net/products/200000420363/v.5060.8g.zt.twin.plus_d75234518f1941929c0807e37d6fecd6.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (53, N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-geforce-rtx-5060-8gb-gddr7-oc-edition-a-dual-rtx5060-o8g-a-3840-cuda-pcie-5-0', N'https://cdn.hstatic.net/products/200000420363/v.5060.8g.as.dual.oc.a8_ffdfbf461dca4741bb348017a9fc5a06.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (54, N'https://tinhocngoisao.com/products/ram-pc-ocpc-xt-ii-black-8gb-ddr4-1x8gb-3200mhz-cl16-intel-xmp-2-0-mmx8gd432c16u', N'https://cdn.hstatic.net/products/200000420363/r4.8g.3200.ocpc.xt.ii.bl_edd83c67740943ac878c05eed6d22d0a.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (55, N'https://tinhocngoisao.com/products/ram-pc-vsp-16gb-ddr5-1x16gb-4800mhz-cl40-khong-tan-nhiet-intel-only', N'https://cdn.hstatic.net/products/200000420363/i_xu_ng_-_2026-05-12t083526.425_efefd5c3e8b646c9b3174e18bd6c9dfb_large_665b84abaa4249bda7683828227b6ca8.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (56, N'https://tinhocngoisao.com/products/ram-pc-vsp-8gb-ddr4-3200mhz-p-n-dd04-8gddr40173-udimm-cl18-tan-nhiet-nhom-den', N'https://cdn.hstatic.net/products/200000420363/r4.8g.3200.vsp.tn4_ffd923235acc4dad895de809537a69f6.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (57, N'https://tinhocngoisao.com/products/ram-4-8g-bus-3200-ddr4-kingmax-blade-x-tan-nhiet-km-ld4a-3200-08gsbk18', N'https://cdn.hstatic.net/products/200000420363/t_i_xu_ng_-_2025-12-06t083047.868_54c95cdeebf24a9f825cf98eb426bd18.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (58, N'https://tinhocngoisao.com/products/ram-pc-vsp-8gb-ddr4-3200mhz-tan-nhiet-nhom-cl22-ddr4-8gnddr0188', N'https://cdn.hstatic.net/products/200000420363/r4.8g.3200.vsp.tn.cl22_caa311bd50b34d11a00ab1d489659fdb.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (59, N'https://tinhocngoisao.com/products/ram-pc-corsair-vengeance-8gb-ddr5-5200mhz-cmk8gx5m1b5200c40-1x8gb-5200mhz', N'https://cdn.hstatic.net/products/200000420363/t_i_xu_ng__10__6715af0bd22b45e2a9a9ecd33cac8d33.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (60, N'https://tinhocngoisao.com/products/ram-pc-patriot-8gb-ddr4-3200mhz-tan-nhiet-psp48g320081h1', N'https://product.hstatic.net/200000420363/product/2_39c87a4826734981b1a2a34bb5bdb907.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (61, N'https://tinhocngoisao.com/products/ram-laptop-sstc-8gb-ddr4-3200mhz-sodimm', N'https://cdn.hstatic.net/products/200000420363/8_550dfa32aeb14210b504befd90e4037b.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (62, N'https://tinhocngoisao.com/products/ram-pc-silicon-power-8gb-ddr4-3200mhz-udimm-90wk0000-mmr100-sp008gblfu320b02lf-1x8gb-1-2v-cl22', N'https://cdn.hstatic.net/products/200000420363/r4.8g.3200.sp_85d6aea2c0d0481f8d2658fdde58370d.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (63, N'https://tinhocngoisao.com/products/ram-pc-teamgroup-elite-plus-8gb-ddr4-3200mhz-1x8gb-cl22-tan-nhiet-nhom', N'https://cdn.hstatic.net/products/200000420363/r4.8g.3200.te.elite.pl1_8779749ee132443abe1802dcf2c50a7b.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (64, N'https://tinhocngoisao.com/products/o-cung-ssd-faspeed-k7-128gb-sata-k7-128g-cd-2-5-inch-sata-iii-550mb-s', N'https://cdn.hstatic.net/products/200000420363/2880-ssd-faspeed-60gb_f35d4be02e6b476fb8be5b50235bc3ba.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (65, N'https://tinhocngoisao.com/products/o-cung-ssd-512gb-patriot-p300-m2-2280-nvme-p300p512gm28', N'https://product.hstatic.net/200000420363/product/1_0d6d3f6b70614bc1a7c53cc1ad0311b9.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (66, N'https://tinhocngoisao.com/products/o-cung-ssd-apacer-as2280p4-256gb-pcie-gen3-x4-nvme-m-2-2280-ap256gas2280p4-1', N'https://cdn.hstatic.net/products/200000420363/250-27533-ssd-apacer-as2280p4-51__1__709d5690e5b144f18fab534044d52502.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (67, N'https://tinhocngoisao.com/products/o-cung-ssd-ocpc-xtl-200-256gb-ssd25s3t256glt-sata-iii-2-5-inch-doc-500mb-s-ghi-420mb-s', N'https://cdn.hstatic.net/products/200000420363/ss.256.ocpc.xtl-200_0e5e350f6b8b404897e08130ee754724.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (68, N'https://tinhocngoisao.com/products/o-cung-ssd-sstc-m100-256gb-sata-iii-2-5', N'https://cdn.hstatic.net/products/200000420363/t_i_xu_ng_-_2026-04-29t144747.858_519865eaa2f342a3a4e363b5955ff29b.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (69, N'https://tinhocngoisao.com/products/o-cung-ssd-480g-kingmax-smv32-sata-iii-km480gsmv32', N'https://product.hstatic.net/200000420363/product/11_10dad6b62e8440959f9727680069f817.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (70, N'https://tinhocngoisao.com/products/o-cung-ssd-adata-su650-256gb', N'https://product.hstatic.net/200000420363/product/23_p_su650_01_0628_1b004f5d2dfb466095aa68f1caae386b.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (71, N'https://tinhocngoisao.com/products/o-cung-ssd-teamgroup-mp33-512tb-pcie-gen3x4-tm8fp6512g0c101', N'https://product.hstatic.net/200000420363/product/o-cung-ssd-teamgroup-mp33-1tb-pcie-gen3x4-_tm8fp6001t0c101__c625382ea89742e6885c50f333626855.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (72, N'https://tinhocngoisao.com/products/o-cung-ssd-hiksemi-512gb-pcie-gen-3x4-nvme', N'https://cdn.hstatic.net/products/200000420363/snapbg.ai_1767940231136_bf3a636d1e344c09a66ac40ab36d61e9.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (73, N'https://tinhocngoisao.com/products/o-cung-ssd-agi-ai198r-256gb-agi256g80ai198r-cb-pcie-gen3-x4-nvme-m-2-2280-3d-nand', N'https://cdn.hstatic.net/products/200000420363/ss.256.agi.ai198r_798d05e46bcd4d36ada17e4b72a9ca59.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (74, N'https://tinhocngoisao.com/products/o-cung-hdd-seagate-barracuda-2-tb-sata-iii-3-5-st2000dm008', N'https://cdn.hstatic.net/products/200000420363/seagate-brc-2tb-2_cab2768d00044a15beb006d5dc6eff67_large_981a6068d35b4a0f968ce072ffe22a45.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (75, N'https://tinhocngoisao.com/products/o-cung-hdd-seagate-4tb-barracuda-chinh-hang-st4000dm004', N'https://product.hstatic.net/200000420363/product/sg-brc-004-2_f2052d2db47543999ccfbefc743a154e.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (76, N'https://tinhocngoisao.com/products/o-cung-hdd-western-digital-blue-2-tb-sata-iii-3-5-wd20ezbx', N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_09b406ce89aa4bafa21f1343f7979a2b.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (77, N'https://tinhocngoisao.com/products/o-cung-hdd-4tb-seagate-ironwolf-nas-sata-iii-st4000vn006-5400rpm-256mb-cache-3-5-inch', N'https://cdn.hstatic.net/products/200000420363/st4000vn006_1c7b4da86b344a5ca39e4de21ccc299b.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (78, N'https://tinhocngoisao.com/products/o-cung-hdd-2tb-seagate-ironwolf-nas-sata-iii-st2000vn003-5400rpm-256mb-3-5-inch', N'https://cdn.hstatic.net/products/200000420363/h.2t.sg.st2000vn003_acf0c7f00e5e408e8766992c38210997.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (79, N'https://tinhocngoisao.com/products/nguon-may-tinh-750w-jetek-j-series-750w-plus-st750-atx-12v-pfc-ean-0-bh-36t-bao-hanh-doi-trong-1-gio', N'https://product.hstatic.net/200000420363/product/3_2807ba5d960145b7a00855d9f0851003.jpeg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (80, N'https://tinhocngoisao.com/products/nguon-may-tinh-antec-atom-zen-450-230v-ac-v1000n712gc-22-450w-120mm-silent-fan-den', N'https://cdn.hstatic.net/products/200000420363/p.at.atom.zen.4505_copy_31b48bad1d1d4d928b052fd0190afb94.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (81, N'https://tinhocngoisao.com/products/thung-may-star-office-cs600-micro-atx-mini-itx-usb-3-0-kem-san-1-fan-90mm-thep-0-8mm-den', N'https://cdn.hstatic.net/products/200000420363/ca.star.cs600.black_2dbcc7daf2df4476b3cce93e3ded610a.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (82, N'https://tinhocngoisao.com/products/thung-may-gaming-linktech-bahamut-m-4f-m-atx-kem-san-4-fan-fixed-rgb-den', N'https://cdn.hstatic.net/products/200000420363/bahamut-m__1__copy_4375aaa5dfbf416599088e094411c385.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (83, N'https://tinhocngoisao.com/products/case-sama-a302', N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_9e09081ee49b427e9bfd0328d5d63938.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (84, N'https://tinhocngoisao.com/products/thung-may-case-nzxt-h210i-den-trang-mini-itx-nhap-khau-ca-h210i-w1', N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_e25225cc8a334f8ca46aef143e083773.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (85, N'https://tinhocngoisao.com/products/thung-may-case-xigmatek-xa-22-en47567-no-fan', N'https://product.hstatic.net/200000420363/product/ca_xmt_xa22_82363b655a3d47988576e9dd081aff61.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (86, N'https://tinhocngoisao.com/products/thung-may-magic-m-07-m-atx-itx', N'https://cdn.hstatic.net/products/200000420363/snapbg.ai_1768527645694_357640729fda488db280df0f805224ec.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (87, N'https://tinhocngoisao.com/products/thung-may-case-antec-c3-basic-atx-khong-kem-fan-ho-ca-mau-den', N'https://product.hstatic.net/200000420363/product/tinhocngoisao.com1__4__546a03879c4d4ce28e6a25b138f00272.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (88, N'https://tinhocngoisao.com/products/thung-may-xigmatek-dynamic-ml-m-atx-khong-kem-fan-en91134-micro-atx-mini-itx-gpu-410mm-den', N'https://cdn.hstatic.net/products/200000420363/ca.xmt.dynamic.ml.black_415538eb034b4d8faa6fa06784c3a817.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (89, N'https://tinhocngoisao.com/products/thung-may-case-mik-morax-3fa-den', N'https://product.hstatic.net/200000420363/product/thung-may-case-mik-morax-3fa-b-3_dc8dd8819e98466c920e2cee0ee1197c.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (90, N'https://tinhocngoisao.com/products/tan-nhiet-linh-kien-cpu-intel-12th-socket-1700', N'https://cdn.hstatic.net/products/200000420363/95162605695373948_8995162605695373948_62326f6acdf26a35868d9e7573b984ba_6ad4f4a7cc054ae7824e82b06ef1047a.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (91, N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-a220-fan-92mm-led-rgb-fixed-1200-1700-den', N'https://cdn.hstatic.net/products/200000420363/t_i_xu_ng_-_2025-12-11t140718.858_70b7de88da434dbdae3760e516982bbd.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (92, N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k400-rgb-black-support-2011', N'https://product.hstatic.net/200000420363/product/k4002_ce43fc0bc3f64df0a8c703291ed9cec0.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (93, N'https://tinhocngoisao.com/products/tan-nhiet-khi-cpu-jonsbo-cr-1000-evo-rgb-black', N'https://product.hstatic.net/200000420363/product/tan-nhiet-cpu-jonsbo-cr-1000-evo-rgb_fc65c36d565c461ab80cc7ddc2964c14.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (94, N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k400-pro-rgb-dual-fan-support-2011', N'https://product.hstatic.net/200000420363/product/tan-nhiet-khi-jungle-leopard-k400-pro-black-3_3e9c1bc21be447aca368a89d592dd4b7.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (95, N'https://tinhocngoisao.com/products/tan-nhiet-cpu-jonsbo-cr-1200-rgb-cooling-air', N'https://product.hstatic.net/200000420363/product/1_93e06f9aea44419896b00a85dac5a310.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (96, N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k420e-digital-led-argb-ho-tro-socket-2011-mau-den', N'https://product.hstatic.net/200000420363/product/tinhocngoisao.com1_b365d9c33daf49b5818cbdfd59e51992.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (97, N'https://tinhocngoisao.com/products/tan-nhiet-khi-thermalright-assassin-king-120-se-black', N'https://product.hstatic.net/200000420363/product/1-2_f01951fd600442639efe6e3cc6f67c41.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (98, N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-tk1-den-240mm-rgb-fixed', N'https://cdn.hstatic.net/products/200000420363/snapbg.ai_1775288137486_b738126ba6ed4ce8837e6cfee8f80f08.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (99, N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-astrobeat-360-digital-argb-black', N'https://cdn.hstatic.net/products/200000420363/snapbg.ai_1775288989197_f0dffa2078084ae6ab395b9d7c1ea76f.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (100, N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-tk1-trang-240mm-rgb-fixed', N'https://product.hstatic.net/200000420363/product/tan-nhiet-nuoc-leopard-tk1-5_c0e905d301894087a69ca16652bbfc4f.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (101, N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-240-argb-display-trang', N'https://product.hstatic.net/200000420363/product/1-2__2__db7b9b02ac8d49878dadbf47dac94b23.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (102, N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-240-argb-display-den', N'https://product.hstatic.net/200000420363/product/1-3__3__69228c3142074e1492e4aabdeffc7dd5.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (103, N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-infinity-240-black-argb', N'https://product.hstatic.net/200000420363/product/1-2_52c30d080b1d49f28f12640bc7c60442.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (104, N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-infinity-360-black-argb', N'https://product.hstatic.net/200000420363/product/1_57219a70085447e98e56051c2587166f.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (105, N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-aqua-elite-360-v3-den-argb', N'https://product.hstatic.net/200000420363/product/1-2_fd50269a247644e1b50f466cb3008cd1.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (106, N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-aqua-elite-240-v3-den-argb', N'https://product.hstatic.net/200000420363/product/1-3_c25b4bf6068d43e48149309f0c03b42f.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (107, N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-360-argb-display-den', N'https://product.hstatic.net/200000420363/product/1-8__1__fd57cb86aee44bd286e5ed0bce87a5aa.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (108, N'https://tinhocngoisao.com/products/quat-tan-nhiet-pc-oem-a1225l-12s-120mm-khong-led-hieu-nang-cao-khung-luoi-bao-ve-4pin-pwm-den', N'https://cdn.hstatic.net/products/200000420363/f.ca.a1225l.12s.black3_bb01658abfd24be0b13124dde8038833.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (109, N'https://tinhocngoisao.com/products/fan-case-leopard-f6-pro-argb-den-gio-thuan-4-mat-vo-cuc', N'https://product.hstatic.net/200000420363/product/fan-case-leopard-f6-pro-argb-4_6df61ed85c564da883e6ec6653de874d.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (110, N'https://tinhocngoisao.com/products/fan-case-leopard-s1-auto-rgb-den-gio-nguoc-cam-nguon-truc-tiep', N'https://product.hstatic.net/200000420363/product/tinhocngoisao.com1__8__06c39480eb3740dcb0ee4ddc1e721ca2.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (111, N'https://tinhocngoisao.com/products/quat-tan-nhiet-pc-jungle-leopard-f8-v3-black-2000rpm-4pin-pwm-co-dieu-toc-khong-led-den', N'https://cdn.hstatic.net/products/200000420363/f.ca.lp.f8.v3.black_28c4cc0d47854b7489925c31986e74a9.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (112, N'https://tinhocngoisao.com/products/fan-case-leopard-f6-pro-argb-den-4-mat-vo-cuc-gio-nguoc', N'https://product.hstatic.net/200000420363/product/fan-case-leopard-f6-pro-argb-4_dc873f268b564764afb04106d2ec15a9.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (113, N'https://tinhocngoisao.com/products/man-hinh-van-phong-dahua-dhi-lm24-a221y-24-inch-full-hd-ips-144hz', N'https://cdn.hstatic.net/products/200000420363/l.24.dh.dhi-lm24-a221y_f2d30a222d1048f2972dcff7f5a0e593.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (114, N'https://tinhocngoisao.com/products/man-hinh-vsp-ip2736g-den-27-inch-full-hd-ips-360hz-1ms-phang', N'https://cdn.hstatic.net/products/200000420363/t_i_xu_ng__82__89966abf327240169922b2d8d19511bb_large_a962f017d0444e87b643d2258658e180.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (115, N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-msi-mpg-275cqrxf-27-inch-wqhd-rapid-va-240hz-usb-c-pd-98w-chan-cth', N'https://cdn.hstatic.net/products/200000420363/l.27.msi.2k.mpg275cqrxf_b406312312574e56a75790f9ddc59b15.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (116, N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-vsp-aivision-ag2714qs1-27-inch-qhd-144hz-ips-1ms-lh-tu-van-truoc-khi-lap-arm-gia-treo', N'https://cdn.hstatic.net/products/200000420363/l.27.avs.2k.ag2714qs1_50bfccd94ec44424ac80947983dcb375.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (117, N'https://tinhocngoisao.com/products/man-hinh-van-phong-dahua-dhi-lm22-a211y-21-45-inch-fhd-120hz-ips-hdmi-vga', N'https://cdn.hstatic.net/products/200000420363/l.22.dh.lm22-a211y_c3dbf7f555264fcab8ecde16dc0de240.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (118, N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-vsp-aivision-ag2414qs1-24-inch-qhd-144hz-ips-1ms', N'https://cdn.hstatic.net/products/200000420363/l.24.avs.2k.ag2414qs1_fd4cf2e9d7f047cf98644a280186c2ee.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (119, N'https://tinhocngoisao.com/products/ban-phim-van-phong-logitech-k120-chinh-hang-den', N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_f8f19e7ee21e42e7a37fe9bfef0907c1.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (120, N'https://tinhocngoisao.com/products/combo-phim-chuot-logitech-mk120-den', N'https://product.hstatic.net/200000420363/product/combo_phim_chuot_logitech_mk120_-__den__51c424ada06e4d0c83ea9043d276888c.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (121, N'https://tinhocngoisao.com/products/ban-phim-motospeed-k103-black', N'https://cdn.hstatic.net/products/200000420363/tinhocngoisao.com1_338289071cfa4_c805e0b1be63450e8900cdda0ef62750.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (122, N'https://tinhocngoisao.com/products/ban-phim-co-gaming-khong-day-rapoo-v500-pro-87-multi-mode-wireless-3-mode-red-switch-led-6-mau', N'https://cdn.hstatic.net/products/200000420363/kb.rp.v500.pro.87.res5_9b52e10e7e874869b561661b707e6b7e.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (123, N'https://tinhocngoisao.com/products/combo-ban-phim-chuot-gia-co-gaming-shipadoo-d500-co-day-usb-led-rainbow-1000-dpi-den', N'https://cdn.hstatic.net/products/200000420363/gemini_generated_image_tpxd16tpxd16tpxd_15469cadc66b4be5acfd4ac53cd4892e.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (124, N'https://tinhocngoisao.com/products/ban-phim-dare-u-lk185-den', N'https://product.hstatic.net/200000420363/product/kb_du_lk185_74f5d5d561da4b5693a6824d010c0d32.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (125, N'https://tinhocngoisao.com/products/chuot-van-phong-logitech-b100-chinh-hang', N'https://cdn.hstatic.net/products/200000420363/t_i_xu_ng_-_2026-01-27t101310.215_90852a456f1b40c8a1cc88396d70704f.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (126, N'https://tinhocngoisao.com/products/chuot-logitech-g102-gen-ii-lightsync-rgb-gaming-den', N'https://product.hstatic.net/200000420363/product/1_953b62f3b78d4ad8931916a08438eaca.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (127, N'https://tinhocngoisao.com/products/chuot-motospeed-f333-black', N'https://cdn.hstatic.net/products/200000420363/chatgpt_image_10_07_32_27_thg_1__2026_4c6dd2a89c4f4e4d906517adb6f939c9.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (128, N'https://tinhocngoisao.com/products/chuot-khong-day-dare-u-lm106g-black', N'https://cdn.hstatic.net/products/200000420363/download__4__b5726c18f2ec4233a09543a06e28b087.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (129, N'https://tinhocngoisao.com/products/chuot-logitech-b175-optical-wireless-black', N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_90b8854a35804dd294f3f6007ce3c2d4.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (130, N'https://tinhocngoisao.com/products/chuot-gaming-khong-day-dare-u-em910g-triple-mode-12000-dpi-mau-den-59g', N'https://cdn.hstatic.net/products/200000420363/mo.du.em910g.de_4cb81a7c8e5c439ab45209576b3ffb69.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (131, N'https://tinhocngoisao.com/products/loa-may-tinh-usb-2-0-kisonli-v410-black', N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_42e32d6d71944c1fb5d53524385a1bc5.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (132, N'https://tinhocngoisao.com/products/loa-kiem-am-edifier-mr3-trang', N'https://cdn.hstatic.net/products/200000420363/download__60__49b907d029af48e2bb5d34ef88292c7f.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (133, N'https://tinhocngoisao.com/products/loa-may-tinh-usb-2-0-kisonli-l-1040-pink', N'https://product.hstatic.net/200000420363/product/_new_-anh-sp-web_dc407a8f669b4d759bea2ecf1df19aee.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (134, N'https://tinhocngoisao.com/products/loa-bluetooth-edifier-r1080bt-black', N'https://product.hstatic.net/200000420363/product/loa-bluetooth-edifier-r1080bt---black_5405602765144ddb8895783815942c5f.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (135, N'https://tinhocngoisao.com/products/loa-soundbar-thonet-vander-dunn-gen-2-bluetooth-5-3-mau-den', N'https://cdn.hstatic.net/products/200000420363/_new_-_nh-sp-web_75906f7baffd4a13b427910160197729.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (136, N'https://tinhocngoisao.com/products/tai-nghe-xiberia-q4-virtual-7-1', N'https://product.hstatic.net/200000420363/product/tai-nghe-xiberia-q4-virtual-7.1-2_f878fca850c54308ac1ee495a0f669d8.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (137, N'https://tinhocngoisao.com/products/tai-nghe-dare-u-eh925l-rgb-7-1-black-red', N'https://product.hstatic.net/200000420363/product/tai-nghe-dare-u-eh925l-rgb-7.1_1f171c353bd946a5972018e00c6e606f.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (138, N'https://tinhocngoisao.com/products/tai-nghe-dareu-eh722x-pro-multi-led', N'https://cdn.hstatic.net/products/200000420363/tinhocngoisao.com1__6__42fba73c35e04789a57b4eaa391a4362_large_133fb1bfb6bb41fdbb107367f65220db.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (139, N'https://tinhocngoisao.com/products/tai-nghe-xiberia-v15-7-1-surround-gaming-led-den', N'https://product.hstatic.net/200000420363/product/xiberia-v15-1_4fbac545932b4e0699400ba52ff5b0bf.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (140, N'https://tinhocngoisao.com/products/tai-nghe-gaming-dare-u-eh416-7-1-rgb-black', N'https://product.hstatic.net/200000420363/product/hp_du_eh416_rgb-600x600_759e38e805044c3882cdda7f45902bef.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (141, N'https://tinhocngoisao.com/products/webcam-ai-hd-2k-full-hd-1080p', N'https://product.hstatic.net/200000420363/product/wc_ai_hd-2k-7_9b87ad62330740abbf338c234674a2d6.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (142, N'https://tinhocngoisao.com/products/webcam-vsp-w66-w-r-full-hd-1080p', N'https://cdn.hstatic.net/products/200000420363/download__73__74d574a6127a4d11b8d8a266f929da3c.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (143, N'https://tinhocngoisao.com/products/webcam-vsp-w66-w-full-hd-1080p', N'https://cdn.hstatic.net/products/200000420363/wc_ai_w66-r-2_fbeb7e353ed6426baaea27a93dc925dc_large__1__283f4a95f1834ed2bf53c87d7f75162d.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (144, N'https://tinhocngoisao.com/products/webcam-logitech-c270-hd-720p', N'https://product.hstatic.net/200000420363/product/wc-lgt-c270-3-new_f58aa5f99ec64a599d474807f8321b49.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (145, N'https://tinhocngoisao.com/products/webcam-logitech-brio-100-black-960-001587', N'https://cdn.hstatic.net/products/200000420363/download__71__af42ae89c810486db06c988da719c449.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (146, N'https://tinhocngoisao.com/products/webcam-logitech-brio-100-white-960-001618', N'https://cdn.hstatic.net/products/200000420363/download__72__33a493a7d5b34a54a8ce921a03bbc4c2.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (147, N'https://tinhocngoisao.com/products/gia-treo-man-hinh-vsp-vg60-1-den-xam-17-42-inch-chan-de-rgb-nut-chinh-led-cong-usb-3-0-type-c', N'https://cdn.hstatic.net/products/200000420363/_new_-_nh-sp-web_408ead395fc14f099f6a90da162897e8.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (148, N'https://tinhocngoisao.com/products/gia-treo-man-hinh-north-bayou-a5-gaming-version-2026-chan-don-17-32-inch-den', N'https://cdn.hstatic.net/products/200000420363/z7789489718059_070b086539c91cdee7672a8978a044ef_e95c4b90186c45a3af67d7feb34d8459.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (149, N'https://tinhocngoisao.com/products/gia-treo-lcd-northbayou-f80-17-32-inch-new-version-2026-ma-u-xam', N'https://cdn.hstatic.net/products/200000420363/17---30-inch_f1fce57c42e84810ae2497299a585cd3_large_0f25f1d215454fd8bbd95007394c9995.png', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (150, N'https://tinhocngoisao.com/products/gia-treo-lcd-northbayou-f80-xe-17-32-new-version-2026-ma-u-tra-ng-eg', N'https://cdn.hstatic.net/products/200000420363/z7759179763669_14c277d310922023ffc9e61392d1f2d3_copy_32f4c966c058490c82f472cad71008ad.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (151, N'https://tinhocngoisao.com/products/gia-treo-man-hinh-north-bayou-a5-xs-gaming-version-2026-chan-don-17-32-inch-bac', N'https://cdn.hstatic.net/products/200000420363/logoremover_1777883017368_5a87819eb30e4c4da8cc489171ee9cbb.jpeg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (152, N'https://tinhocngoisao.com/products/gia-treo-man-hinh-north-bayou-a5-c-gaming-version-2026-chan-doi-17-32-inch-den', N'https://cdn.hstatic.net/products/200000420363/a5c_-_1_b88617faec4347d5ab799e44947ce3a7.jpeg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (153, N'https://nguyencongpc.vn/nguon-msi-mag-a650bn-650w-80-plus-bronze', N'https://www.nguyencongpc.vn/media/product/21184-msi-mag-a650bn-650w-80-plus-bronze.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (154, N'https://nguyencongpc.vn/tan-nhiet-khi-cpu-deepcool-ak400', N'https://www.nguyencongpc.vn/media/product/24829-t---n-nhi---t-kh---cpu-deepcool-ak400.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (155, N'https://nguyencongpc.vn/o-cung-ssd-kingston-nv2-1tb-pcie-40-x4-nvme-m2-snv2s1000g', N'https://www.nguyencongpc.vn/media/product/23609---dasd.jpg', N'20261026', N'DEMO', N'DEMO', N'DEMO: giá 1.000.000đ để test, nguồn chỉ báo liên hệ. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (156, N'https://nguyencongpc.vn/micro-razer-seiren-x-quartz-pink-edition', N'https://nguyencongpc.vn/media/product/23037-micro-h---ng-4.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.'),
+        (157, N'https://nguyencongpc.vn/pc-dohoa-ncpc-31', N'https://www.nguyencongpc.vn/media/product/24065-pc-do-hoa-a380.jpg', N'20261026', N'RETAILER_SNAPSHOT', N'DEMO', N'Giá tham khảo từ nguồn tại thời điểm lấy dữ liệu. DEMO: tồn kho nội bộ 20, không phải số hàng của cửa hàng nguồn.');
+
+    INSERT INTO #related_source_seed (product_id, source_url) VALUES
+        (47, N'https://nguyencongpc.vn/card-man-hinh-asus-dual-rtx-3050-6gb'),
+        (47, N'https://www.asus.com/us/motherboards-components/graphics-cards/dual/dual-rtx3050-6g/techspec/'),
+        (47, N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-6gb-gddr6-90yv0k61-m1na00'),
+        (153, N'https://nguyencongpc.vn/nguon-msi-mag-a650bn-650w-80-plus-bronze'),
+        (153, N'https://vn.msi.com/Power-Supply/MAG-A650BN/Specification'),
+        (153, N'https://tinhocngoisao.com/products/nguon-msi-mag-a650bn-650w-80-plus-bronze');
+
+    INSERT INTO #spec_seed (sku, attribute_name, attribute_value, source_status, source_url, source_note) VALUES
+        (N'THNS-1062950403', N'Thông tin sản phẩm', N'PC Gaming STAR Yasuo | Intel I5 12400F, RTX 3050 6G, H610M, RAM 16GB, SSD 500GB', N'SOURCED', N'https://tinhocngoisao.com/products/pc-gaming-star-yasuo-intel-i5-12400f-rtx-3050-6g-h610m-ram-16gb-ssd-500gb', N'Thông tin tên sản phẩm tại cửa hàng; chưa có bảng thông số chi tiết.'),
+        (N'THNS-1071351902', N'Thông tin sản phẩm', N'PC Gaming Storm E | Intel Core i3 13100F, RAM 16GB, SSD 512, RTX 3050', N'SOURCED', N'https://tinhocngoisao.com/products/pc-storm-e-intel-core-i3-12100f-ram-16gb-ssd-512-rtx-3050', N'Thông tin tên sản phẩm tại cửa hàng; chưa có bảng thông số chi tiết.'),
+        (N'THNS-1058013582', N'Thông tin sản phẩm', N'PC Gaming Cypher | Intel i3 12100F \ RTX 3050 6G\ H610M\ DDR5 16GB\ SSD 512GB', N'SOURCED', N'https://tinhocngoisao.com/products/pc-gaming-star-cypher-intel-i3-12100f-rtx-3050-6g-h610m-ram-16gb-ssd-512gb-1', N'Thông tin tên sản phẩm tại cửa hàng; chưa có bảng thông số chi tiết.'),
+        (N'THNS-1067291853', N'Thông tin sản phẩm', N'PC Gaming Hunt E | AMD Ryzen 5 5500, B450, RAM 16GB, SSD 512GB, RX 6500XT', N'SOURCED', N'https://tinhocngoisao.com/products/pc-star-hunt-e-amd-ryzen-5-5500-b450m-ram-16gb-ssd-512gb-rx-6500-xt', N'Thông tin tên sản phẩm tại cửa hàng; chưa có bảng thông số chi tiết.'),
+        (N'THNS-1076093219', N'Thông tin sản phẩm', N'PC Văn Phòng StarPC Office 5 | AMD Ryzen 5 5500GT, RAM 8GB, SSD 512GB, Win 11 Pro', N'SOURCED', N'https://tinhocngoisao.com/products/pc-van-phong-starpc-office-5-amd-ryzen-5-5500gt-ram-8gb-ssd-512gb-win-11-pro', N'Thông tin tên sản phẩm tại cửa hàng; chưa có bảng thông số chi tiết.'),
+        (N'THNS-1076093143', N'Thông tin sản phẩm', N'PC Văn Phòng StarPC Office 5 | AMD Ryzen 5 3400G,RAM 8GB, SSD 512GB, Win 11 Pro', N'SOURCED', N'https://tinhocngoisao.com/products/pc-van-phong-starpc-office-3-starpc-office-5-amd-ryzen-5-3400g-ram-8gb-ssd-512gb-win-11-pro', N'Thông tin tên sản phẩm tại cửa hàng; chưa có bảng thông số chi tiết.'),
+        (N'THNS-1076093073', N'Thông tin sản phẩm', N'PC Văn Phòng StarPC Office 5 | Intel Core i5 14400, RAM 8GB, SSD 512GB, Wi-Fi, Win 11 Pro', N'SOURCED', N'https://tinhocngoisao.com/products/pc-van-phong-starpc-office-3-starpc-office-5-intel-core-i5-14400-ram-8gb-ssd-512gb-wi-fi-win-11-pro', N'Thông tin tên sản phẩm tại cửa hàng; chưa có bảng thông số chi tiết.'),
+        (N'THNS-1076092983', N'Thông tin sản phẩm', N'PC Văn Phòng StarPC Office 3 | Intel Core i3 14100, RAM 8GB, SSD 512GB, Wi-Fi, Win 11 Pro', N'SOURCED', N'https://tinhocngoisao.com/products/pc-van-phong-starpc-office-3-intel-core-i3-14100-ram-8gb-ssd-512gb-wi-fi-win-11-pro', N'Thông tin tên sản phẩm tại cửa hàng; chưa có bảng thông số chi tiết.'),
+        (N'THNS-1038110471', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-intel-core-i5-12400f-box-chinh-hang-2-50-up-to-4-40ghz', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1038110471', N'TDP', N'117.0', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-intel-core-i5-12400f-box-chinh-hang-2-50-up-to-4-40ghz', N'Chọn mức công suất cao nhất công bố trong trường TDP để dự phòng; không coi base TDP là công suất cực đại.'),
+        (N'THNS-1038110471', N'RAM tối đa', N'128', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1038110471', N'Đồ họa tích hợp', N'Không', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1038110471', N'Kèm tản nhiệt', N'Không', N'DEMO', N'DEMO', N'Giả lập không kèm tản: chọn tản rời để kiểm thử; bao bì/MPK/tray cần kiểm tra thực tế.'),
+        (N'THNS-1038110471', N'Hãng', N'Intel', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i5-12400f-box-chinh-hang-2-50-up-to-4-40ghz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1038110471', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i5-12400f-box-chinh-hang-2-50-up-to-4-40ghz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1038110471', N'Thông số giả lập 1', N'DEMO: RAM tối đa; Đồ họa tích hợp; Kèm tản nhiệt', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1072199782', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-intel-core-i3-14100-tray-chinh-hang-no-box', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072199782', N'TDP', N'110', N'DEMO', N'https://tinhocngoisao.com/products/cpu-intel-core-i3-14100-tray-chinh-hang-no-box', N'Mức công suất giả lập phục vụ kiểm thử, không phải kết quả đo hoặc giá trị hãng đã xác minh.'),
+        (N'THNS-1072199782', N'RAM tối đa', N'128', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1072199782', N'Đồ họa tích hợp', N'Có', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1072199782', N'Kèm tản nhiệt', N'Không', N'DEMO', N'DEMO', N'Giả lập không kèm tản: chọn tản rời để kiểm thử; bao bì/MPK/tray cần kiểm tra thực tế.'),
+        (N'THNS-1072199782', N'Thương hiệu', N'INTEL', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i3-14100-tray-chinh-hang-no-box', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1072199782', N'Tốc độ', N'3.5Ghz', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i3-14100-tray-chinh-hang-no-box', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1072199782', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i3-14100-tray-chinh-hang-no-box', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1072199782', N'Thông số giả lập 1', N'DEMO: TDP; RAM tối đa; Đồ họa tích hợp; Kèm tản nhiệt', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1052931637', N'Socket', N'AM4', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5500gt-3-6-ghz-up-to-4-6-ghz-6-cores-12-threads-am4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1052931637', N'TDP', N'65.0', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5500gt-3-6-ghz-up-to-4-6-ghz-6-cores-12-threads-am4', N'Chọn mức công suất cao nhất công bố trong trường TDP để dự phòng; không coi base TDP là công suất cực đại.'),
+        (N'THNS-1052931637', N'RAM tối đa', N'128', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1052931637', N'Đồ họa tích hợp', N'Có', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1052931637', N'Kèm tản nhiệt', N'Không', N'DEMO', N'DEMO', N'Giả lập không kèm tản: chọn tản rời để kiểm thử; bao bì/MPK/tray cần kiểm tra thực tế.'),
+        (N'THNS-1052931637', N'Hãng', N'AMD', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5500gt-3-6-ghz-up-to-4-6-ghz-6-cores-12-threads-am4', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1052931637', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5500gt-3-6-ghz-up-to-4-6-ghz-6-cores-12-threads-am4', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1052931637', N'Thông số giả lập 1', N'DEMO: RAM tối đa; Đồ họa tích hợp; Kèm tản nhiệt', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1040779286', N'Socket', N'AM4', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5500-up-to-4-2ghz-6-cores-12-threads-box-chinh-hang', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1040779286', N'TDP', N'65.0', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5500-up-to-4-2ghz-6-cores-12-threads-box-chinh-hang', N'Chọn mức công suất cao nhất công bố trong trường TDP để dự phòng; không coi base TDP là công suất cực đại.'),
+        (N'THNS-1040779286', N'RAM tối đa', N'128', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1040779286', N'Đồ họa tích hợp', N'Không', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1040779286', N'Kèm tản nhiệt', N'Không', N'DEMO', N'DEMO', N'Giả lập không kèm tản: chọn tản rời để kiểm thử; bao bì/MPK/tray cần kiểm tra thực tế.'),
+        (N'THNS-1040779286', N'Hãng', N'AMD', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5500-up-to-4-2ghz-6-cores-12-threads-box-chinh-hang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1040779286', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5500-up-to-4-2ghz-6-cores-12-threads-box-chinh-hang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1040779286', N'Thông số giả lập 1', N'DEMO: RAM tối đa; Đồ họa tích hợp; Kèm tản nhiệt', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1051826646', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-intel-core-i3-14100-box-chinh-hang-3-5-ghz-4-cores-8-threads-lga1700', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1051826646', N'TDP', N'110', N'DEMO', N'https://tinhocngoisao.com/products/cpu-intel-core-i3-14100-box-chinh-hang-3-5-ghz-4-cores-8-threads-lga1700', N'Mức công suất giả lập phục vụ kiểm thử, không phải kết quả đo hoặc giá trị hãng đã xác minh.'),
+        (N'THNS-1051826646', N'RAM tối đa', N'128', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1051826646', N'Đồ họa tích hợp', N'Có', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1051826646', N'Kèm tản nhiệt', N'Không', N'DEMO', N'DEMO', N'Giả lập không kèm tản: chọn tản rời để kiểm thử; bao bì/MPK/tray cần kiểm tra thực tế.'),
+        (N'THNS-1051826646', N'Thông số giả lập 1', N'DEMO: TDP; RAM tối đa; Đồ họa tích hợp; Kèm tản nhiệt', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1036949461', N'Socket', N'AM4', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5600g-3-9ghz-up-to-4-4ghz-am4-6-cores-12-threads-box-chinh-hang', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1036949461', N'TDP', N'65.0', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5600g-3-9ghz-up-to-4-4ghz-am4-6-cores-12-threads-box-chinh-hang', N'Chọn mức công suất cao nhất công bố trong trường TDP để dự phòng; không coi base TDP là công suất cực đại.'),
+        (N'THNS-1036949461', N'RAM tối đa', N'128', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1036949461', N'Đồ họa tích hợp', N'Có', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1036949461', N'Kèm tản nhiệt', N'Không', N'DEMO', N'DEMO', N'Giả lập không kèm tản: chọn tản rời để kiểm thử; bao bì/MPK/tray cần kiểm tra thực tế.'),
+        (N'THNS-1036949461', N'Hãng', N'AMD', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5600g-3-9ghz-up-to-4-4ghz-am4-6-cores-12-threads-box-chinh-hang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036949461', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5600g-3-9ghz-up-to-4-4ghz-am4-6-cores-12-threads-box-chinh-hang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036949461', N'Thông số giả lập 1', N'DEMO: RAM tối đa; Đồ họa tích hợp; Kèm tản nhiệt', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1036949464', N'Socket', N'AM4', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5600x-3-7ghz-up-to-4-6ghz-am4-6-cores-12-threads', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1036949464', N'TDP', N'65.0', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5600x-3-7ghz-up-to-4-6ghz-am4-6-cores-12-threads', N'Chọn mức công suất cao nhất công bố trong trường TDP để dự phòng; không coi base TDP là công suất cực đại.'),
+        (N'THNS-1036949464', N'RAM tối đa', N'128', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1036949464', N'Đồ họa tích hợp', N'Không', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1036949464', N'Kèm tản nhiệt', N'Không', N'DEMO', N'DEMO', N'Giả lập không kèm tản: chọn tản rời để kiểm thử; bao bì/MPK/tray cần kiểm tra thực tế.'),
+        (N'THNS-1036949464', N'Hãng', N'AMD', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5600x-3-7ghz-up-to-4-6ghz-am4-6-cores-12-threads', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036949464', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-amd-ryzen-5-5600x-3-7ghz-up-to-4-6ghz-am4-6-cores-12-threads', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036949464', N'Thông số giả lập 1', N'DEMO: RAM tối đa; Đồ họa tích hợp; Kèm tản nhiệt', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1075978711', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-intel-core-i5-14400-tray-chinh-hang-no-box-khong-kem-fan-lga1700-10-nhan-16-luong-cache-20mb-max-turbo-4-7ghz', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075978711', N'TDP', N'148', N'DEMO', N'https://tinhocngoisao.com/products/cpu-intel-core-i5-14400-tray-chinh-hang-no-box-khong-kem-fan-lga1700-10-nhan-16-luong-cache-20mb-max-turbo-4-7ghz', N'Mức công suất giả lập phục vụ kiểm thử, không phải kết quả đo hoặc giá trị hãng đã xác minh.'),
+        (N'THNS-1075978711', N'RAM tối đa', N'192', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-intel-core-i5-14400-tray-chinh-hang-no-box-khong-kem-fan-lga1700-10-nhan-16-luong-cache-20mb-max-turbo-4-7ghz', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075978711', N'Đồ họa tích hợp', N'Có', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1075978711', N'Kèm tản nhiệt', N'Không', N'DEMO', N'DEMO', N'Giả lập không kèm tản: chọn tản rời để kiểm thử; bao bì/MPK/tray cần kiểm tra thực tế.'),
+        (N'THNS-1075978711', N'Thương hiệu', N'Intel', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i5-14400-tray-chinh-hang-no-box-khong-kem-fan-lga1700-10-nhan-16-luong-cache-20mb-max-turbo-4-7ghz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075978711', N'Model', N'Intel Core i5 14400', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i5-14400-tray-chinh-hang-no-box-khong-kem-fan-lga1700-10-nhan-16-luong-cache-20mb-max-turbo-4-7ghz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075978711', N'Bảo hành', N'36 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i5-14400-tray-chinh-hang-no-box-khong-kem-fan-lga1700-10-nhan-16-luong-cache-20mb-max-turbo-4-7ghz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075978711', N'Thông số giả lập 1', N'DEMO: TDP; Đồ họa tích hợp; Kèm tản nhiệt', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1072199780', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-intel-core-i7-12700-tray-chinh-hang-no-box', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072199780', N'TDP', N'180', N'DEMO', N'https://tinhocngoisao.com/products/cpu-intel-core-i7-12700-tray-chinh-hang-no-box', N'Mức công suất giả lập phục vụ kiểm thử, không phải kết quả đo hoặc giá trị hãng đã xác minh.'),
+        (N'THNS-1072199780', N'RAM tối đa', N'128', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1072199780', N'Đồ họa tích hợp', N'Có', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1072199780', N'Kèm tản nhiệt', N'Không', N'DEMO', N'DEMO', N'Giả lập không kèm tản: chọn tản rời để kiểm thử; bao bì/MPK/tray cần kiểm tra thực tế.'),
+        (N'THNS-1072199780', N'Thương hiệu', N'Intel', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i7-12700-tray-chinh-hang-no-box', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1072199780', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i7-12700-tray-chinh-hang-no-box', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1072199780', N'Thông số giả lập 1', N'DEMO: TDP; RAM tối đa; Đồ họa tích hợp; Kèm tản nhiệt', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1043309247', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-intel-core-i3-13100f-4-cores-8-threads-12mb-up-to-4-5ghz-box-chinh-hang-bx8071513100f', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1043309247', N'TDP', N'110.0', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-intel-core-i3-13100f-4-cores-8-threads-12mb-up-to-4-5ghz-box-chinh-hang-bx8071513100f', N'Chọn mức công suất cao nhất công bố trong trường TDP để dự phòng; không coi base TDP là công suất cực đại.'),
+        (N'THNS-1043309247', N'RAM tối đa', N'128', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1043309247', N'Đồ họa tích hợp', N'Không', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1043309247', N'Kèm tản nhiệt', N'Không', N'DEMO', N'DEMO', N'Giả lập không kèm tản: chọn tản rời để kiểm thử; bao bì/MPK/tray cần kiểm tra thực tế.'),
+        (N'THNS-1043309247', N'Hãng', N'Intel', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i3-13100f-4-cores-8-threads-12mb-up-to-4-5ghz-box-chinh-hang-bx8071513100f', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1043309247', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i3-13100f-4-cores-8-threads-12mb-up-to-4-5ghz-box-chinh-hang-bx8071513100f', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1043309247', N'Thông số giả lập 1', N'DEMO: RAM tối đa; Đồ họa tích hợp; Kèm tản nhiệt', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1073804366', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-intel-core-i3-12100-tray-chinh-hang-no-box-lga-1700-4-nhan-8-luong-max-4-3ghz', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1073804366', N'TDP', N'58.0', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-intel-core-i3-12100-tray-chinh-hang-no-box-lga-1700-4-nhan-8-luong-max-4-3ghz', N'Chọn mức công suất cao nhất công bố trong trường TDP để dự phòng; không coi base TDP là công suất cực đại.'),
+        (N'THNS-1073804366', N'RAM tối đa', N'128', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1073804366', N'Đồ họa tích hợp', N'Có', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1073804366', N'Kèm tản nhiệt', N'Không', N'DEMO', N'DEMO', N'Giả lập không kèm tản: chọn tản rời để kiểm thử; bao bì/MPK/tray cần kiểm tra thực tế.'),
+        (N'THNS-1073804366', N'Hãng', N'Intel', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i3-12100-tray-chinh-hang-no-box-lga-1700-4-nhan-8-luong-max-4-3ghz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073804366', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i3-12100-tray-chinh-hang-no-box-lga-1700-4-nhan-8-luong-max-4-3ghz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073804366', N'Thông số giả lập 1', N'DEMO: RAM tối đa; Đồ họa tích hợp; Kèm tản nhiệt', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1050822626', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-intel-core-i9-14900k-chinh-hang-up-to-6-0ghz-24-cores-32-threads', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1050822626', N'TDP', N'253.0', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-intel-core-i9-14900k-chinh-hang-up-to-6-0ghz-24-cores-32-threads', N'Chọn mức công suất cao nhất công bố trong trường TDP để dự phòng; không coi base TDP là công suất cực đại.'),
+        (N'THNS-1050822626', N'RAM tối đa', N'128', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1050822626', N'Đồ họa tích hợp', N'Có', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1050822626', N'Kèm tản nhiệt', N'Không', N'DEMO', N'DEMO', N'Giả lập không kèm tản: chọn tản rời để kiểm thử; bao bì/MPK/tray cần kiểm tra thực tế.'),
+        (N'THNS-1050822626', N'Hãng', N'Intel', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i9-14900k-chinh-hang-up-to-6-0ghz-24-cores-32-threads', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1050822626', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i9-14900k-chinh-hang-up-to-6-0ghz-24-cores-32-threads', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1050822626', N'Thông số giả lập 1', N'DEMO: RAM tối đa; Đồ họa tích hợp; Kèm tản nhiệt', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1072199781', N'TDP', N'117', N'DEMO', N'https://tinhocngoisao.com/products/cpu-intel-core-i5-12400-tray-chinh-hang-no-box', N'Mức công suất giả lập phục vụ kiểm thử, không phải kết quả đo hoặc giá trị hãng đã xác minh.'),
+        (N'THNS-1072199781', N'RAM tối đa', N'128', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-intel-core-i5-12400-tray-chinh-hang-no-box', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072199781', N'Đồ họa tích hợp', N'Có', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1072199781', N'Kèm tản nhiệt', N'Không', N'DEMO', N'DEMO', N'Giả lập không kèm tản: chọn tản rời để kiểm thử; bao bì/MPK/tray cần kiểm tra thực tế.'),
+        (N'THNS-1072199781', N'Thương hiệu', N'INTEL', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i5-12400-tray-chinh-hang-no-box', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1072199781', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i5-12400-tray-chinh-hang-no-box', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1072199781', N'Socket', N'LGA1700', N'DEMO', N'https://tinhocngoisao.com/products/cpu-intel-core-i5-12400-tray-chinh-hang-no-box', N'Socket giả lập cho bộ test; tên model là thật, trường này chưa được lấy từ trang nguồn.'),
+        (N'THNS-1072199781', N'Thông số giả lập 1', N'DEMO: TDP; Đồ họa tích hợp; Kèm tản nhiệt; Socket', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1051827862', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-intel-core-i7-14700f-box-chinh-hang-5-4-ghz-20-cores-28-threads-lga1700', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1051827862', N'TDP', N'219.0', N'NORMALIZED', N'https://tinhocngoisao.com/products/cpu-intel-core-i7-14700f-box-chinh-hang-5-4-ghz-20-cores-28-threads-lga1700', N'Chọn mức công suất cao nhất công bố trong trường TDP để dự phòng; không coi base TDP là công suất cực đại.'),
+        (N'THNS-1051827862', N'RAM tối đa', N'128', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1051827862', N'Đồ họa tích hợp', N'Không', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1051827862', N'Kèm tản nhiệt', N'Không', N'DEMO', N'DEMO', N'Giả lập không kèm tản: chọn tản rời để kiểm thử; bao bì/MPK/tray cần kiểm tra thực tế.'),
+        (N'THNS-1051827862', N'Hãng', N'Intel', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i7-14700f-box-chinh-hang-5-4-ghz-20-cores-28-threads-lga1700', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051827862', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/cpu-intel-core-i7-14700f-box-chinh-hang-5-4-ghz-20-cores-28-threads-lga1700', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051827862', N'Thông số giả lập 1', N'DEMO: RAM tối đa; Đồ họa tích hợp; Kèm tản nhiệt', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1053987294', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-f-d4-ddr4-lga-1700-matx-2-khe-ram', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1053987294', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-f-d4-ddr4-lga-1700-matx-2-khe-ram', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1053987294', N'Form factor', N'MATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-f-d4-ddr4-lga-1700-matx-2-khe-ram', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1053987294', N'Số khe RAM', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-f-d4-ddr4-lga-1700-matx-2-khe-ram', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1053987294', N'RAM tối đa', N'64', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-f-d4-ddr4-lga-1700-matx-2-khe-ram', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1053987294', N'Khe PCIe x16', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-f-d4-ddr4-lga-1700-matx-2-khe-ram', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1053987294', N'Số cổng SATA khả dụng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-f-d4-ddr4-lga-1700-matx-2-khe-ram', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1053987294', N'Số khe M.2 khả dụng', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-f-d4-ddr4-lga-1700-matx-2-khe-ram', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1053987294', N'Giao tiếp M.2 hỗ trợ', N'NVMe', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1053987294', N'Kích thước M.2 hỗ trợ', N'2280', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1053987294', N'Yêu cầu EPS 8-pin', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1053987294', N'Số cổng xuất hình', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1053987294', N'Thương hiệu', N'ASUS', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-f-d4-ddr4-lga-1700-matx-2-khe-ram', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053987294', N'CPU hỗ trợ', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-f-d4-ddr4-lga-1700-matx-2-khe-ram', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1053987294', N'CPU sẵn sàng với BIOS hiện tại', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-f-d4-ddr4-lga-1700-matx-2-khe-ram', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1053987294', N'Phiên bản BIOS demo', N'DEMO-UPDATED-2026', N'DEMO', N'DEMO', N'Tên phiên bản giả lập; không phải số firmware thật.'),
+        (N'THNS-1053987294', N'Thông số giả lập 1', N'DEMO: Giao tiếp M.2 hỗ trợ; Kích thước M.2 hỗ trợ; Yêu cầu EPS 8-pin; Số cổng xuất hình; CPU hỗ trợ; CPU sẵn sàng với BIOS hiện tại; Phiên bản BIOS demo', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1069254481', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-k-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1069254481', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-k-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1069254481', N'Form factor', N'MATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-k-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1069254481', N'Số khe RAM', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-k-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1069254481', N'RAM tối đa', N'64', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-k-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1069254481', N'Khe PCIe x16', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-k-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1069254481', N'Số cổng SATA khả dụng', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-k-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1069254481', N'Số khe M.2 khả dụng', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-k-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1069254481', N'Giao tiếp M.2 hỗ trợ', N'NVMe', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1069254481', N'Kích thước M.2 hỗ trợ', N'2280', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1069254481', N'Yêu cầu EPS 8-pin', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1069254481', N'Số cổng xuất hình', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1069254481', N'Thương hiệu', N'Gigabyte', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-k-ddr4-rev-1-0', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1069254481', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-k-ddr4-rev-1-0', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1069254481', N'CPU hỗ trợ', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-k-ddr4-rev-1-0', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1069254481', N'CPU sẵn sàng với BIOS hiện tại', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-k-ddr4-rev-1-0', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1069254481', N'Phiên bản BIOS demo', N'DEMO-UPDATED-2026', N'DEMO', N'DEMO', N'Tên phiên bản giả lập; không phải số firmware thật.'),
+        (N'THNS-1069254481', N'Thông số giả lập 1', N'DEMO: Giao tiếp M.2 hỗ trợ; Kích thước M.2 hỗ trợ; Yêu cầu EPS 8-pin; Số cổng xuất hình; CPU hỗ trợ; CPU sẵn sàng với BIOS hiện tại; Phiên bản BIOS demo', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1066944720', N'Socket', N'AM4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-a520m-k-v2-rev-1-1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1066944720', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-a520m-k-v2-rev-1-1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1066944720', N'Form factor', N'MATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-a520m-k-v2-rev-1-1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1066944720', N'Số khe RAM', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-a520m-k-v2-rev-1-1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1066944720', N'RAM tối đa', N'64', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-a520m-k-v2-rev-1-1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1066944720', N'Khe PCIe x16', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-a520m-k-v2-rev-1-1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1066944720', N'Số cổng SATA khả dụng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-a520m-k-v2-rev-1-1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1066944720', N'Số khe M.2 khả dụng', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-a520m-k-v2-rev-1-1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1066944720', N'Giao tiếp M.2 hỗ trợ', N'NVMe', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1066944720', N'Kích thước M.2 hỗ trợ', N'2280', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1066944720', N'Yêu cầu EPS 8-pin', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1066944720', N'Số cổng xuất hình', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1066944720', N'Thương hiệu', N'Gigabyte', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-a520m-k-v2-rev-1-1', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066944720', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-a520m-k-v2-rev-1-1', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066944720', N'CPU hỗ trợ', N'THNS-1052931637;THNS-1040779286;THNS-1036949461;THNS-1036949464', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-gigabyte-a520m-k-v2-rev-1-1', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1066944720', N'CPU sẵn sàng với BIOS hiện tại', N'THNS-1052931637;THNS-1040779286;THNS-1036949461;THNS-1036949464', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-gigabyte-a520m-k-v2-rev-1-1', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1066944720', N'Phiên bản BIOS demo', N'DEMO-UPDATED-2026', N'DEMO', N'DEMO', N'Tên phiên bản giả lập; không phải số firmware thật.'),
+        (N'THNS-1066944720', N'Thông số giả lập 1', N'DEMO: Giao tiếp M.2 hỗ trợ; Kích thước M.2 hỗ trợ; Yêu cầu EPS 8-pin; Số cổng xuất hình; CPU hỗ trợ; CPU sẵn sàng với BIOS hiện tại; Phiên bản BIOS demo', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1050059551', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-b760m-e-ddr4-intel-b760-socket-1700-matx-2-khe-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1050059551', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-b760m-e-ddr4-intel-b760-socket-1700-matx-2-khe-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1050059551', N'Form factor', N'MATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-b760m-e-ddr4-intel-b760-socket-1700-matx-2-khe-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1050059551', N'Số khe RAM', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-b760m-e-ddr4-intel-b760-socket-1700-matx-2-khe-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1050059551', N'RAM tối đa', N'64', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-b760m-e-ddr4-intel-b760-socket-1700-matx-2-khe-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1050059551', N'Khe PCIe x16', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-b760m-e-ddr4-intel-b760-socket-1700-matx-2-khe-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1050059551', N'Số cổng SATA khả dụng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-b760m-e-ddr4-intel-b760-socket-1700-matx-2-khe-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1050059551', N'Số khe M.2 khả dụng', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-b760m-e-ddr4-intel-b760-socket-1700-matx-2-khe-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1050059551', N'Giao tiếp M.2 hỗ trợ', N'NVMe', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1050059551', N'Kích thước M.2 hỗ trợ', N'2280', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1050059551', N'Yêu cầu EPS 8-pin', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1050059551', N'Số cổng xuất hình', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1050059551', N'Thương hiệu', N'MSI', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-b760m-e-ddr4-intel-b760-socket-1700-matx-2-khe-ddr4', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1050059551', N'CPU hỗ trợ', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-msi-pro-b760m-e-ddr4-intel-b760-socket-1700-matx-2-khe-ddr4', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1050059551', N'CPU sẵn sàng với BIOS hiện tại', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-msi-pro-b760m-e-ddr4-intel-b760-socket-1700-matx-2-khe-ddr4', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1050059551', N'Phiên bản BIOS demo', N'DEMO-UPDATED-2026', N'DEMO', N'DEMO', N'Tên phiên bản giả lập; không phải số firmware thật.'),
+        (N'THNS-1050059551', N'Thông số giả lập 1', N'DEMO: Giao tiếp M.2 hỗ trợ; Kích thước M.2 hỗ trợ; Yêu cầu EPS 8-pin; Số cổng xuất hình; CPU hỗ trợ; CPU sẵn sàng với BIOS hiện tại; Phiên bản BIOS demo', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1038110499', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-h610m-k-prime-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1038110499', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-h610m-k-prime-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1038110499', N'Form factor', N'MATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-h610m-k-prime-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1038110499', N'Số khe RAM', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-h610m-k-prime-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1038110499', N'RAM tối đa', N'64', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-h610m-k-prime-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1038110499', N'Khe PCIe x16', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-h610m-k-prime-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1038110499', N'Số cổng SATA khả dụng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-h610m-k-prime-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1038110499', N'Số khe M.2 khả dụng', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-h610m-k-prime-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1038110499', N'Giao tiếp M.2 hỗ trợ', N'NVMe', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1038110499', N'Kích thước M.2 hỗ trợ', N'2280', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1038110499', N'Yêu cầu EPS 8-pin', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1038110499', N'Số cổng xuất hình', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1038110499', N'Thương hiệu', N'ASUS', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-asus-h610m-k-prime-ddr4', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1038110499', N'CPU hỗ trợ', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-asus-h610m-k-prime-ddr4', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1038110499', N'CPU sẵn sàng với BIOS hiện tại', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-asus-h610m-k-prime-ddr4', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1038110499', N'Phiên bản BIOS demo', N'DEMO-UPDATED-2026', N'DEMO', N'DEMO', N'Tên phiên bản giả lập; không phải số firmware thật.'),
+        (N'THNS-1038110499', N'Thông số giả lập 1', N'DEMO: Giao tiếp M.2 hỗ trợ; Kích thước M.2 hỗ trợ; Yêu cầu EPS 8-pin; Số cổng xuất hình; CPU hỗ trợ; CPU sẵn sàng với BIOS hiện tại; Phiên bản BIOS demo', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1056586973', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-h-v3-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1056586973', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-h-v3-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1056586973', N'Form factor', N'MATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-h-v3-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1056586973', N'Số khe RAM', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-h-v3-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1056586973', N'RAM tối đa', N'64', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-h-v3-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1056586973', N'Khe PCIe x16', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-h-v3-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1056586973', N'Số cổng SATA khả dụng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-h-v3-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1056586973', N'Số khe M.2 khả dụng', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-h-v3-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1056586973', N'Giao tiếp M.2 hỗ trợ', N'NVMe', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1056586973', N'Kích thước M.2 hỗ trợ', N'2280', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1056586973', N'Yêu cầu EPS 8-pin', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1056586973', N'Số cổng xuất hình', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1056586973', N'Thương hiệu', N'Gigabyte', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-h-v3-ddr4-rev-1-0', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1056586973', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-h-v3-ddr4-rev-1-0', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1056586973', N'CPU hỗ trợ', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-h-v3-ddr4-rev-1-0', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1056586973', N'CPU sẵn sàng với BIOS hiện tại', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-gigabyte-h610m-h-v3-ddr4-rev-1-0', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1056586973', N'Phiên bản BIOS demo', N'DEMO-UPDATED-2026', N'DEMO', N'DEMO', N'Tên phiên bản giả lập; không phải số firmware thật.'),
+        (N'THNS-1056586973', N'Thông số giả lập 1', N'DEMO: Giao tiếp M.2 hỗ trợ; Kích thước M.2 hỗ trợ; Yêu cầu EPS 8-pin; Số cổng xuất hình; CPU hỗ trợ; CPU sẵn sàng với BIOS hiện tại; Phiên bản BIOS demo', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1076583486', N'Socket', N'AM4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-a520m-s-amd-a520-am4-2-khe-ddr4-pcie-3-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076583486', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-a520m-s-amd-a520-am4-2-khe-ddr4-pcie-3-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076583486', N'Form factor', N'MATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-a520m-s-amd-a520-am4-2-khe-ddr4-pcie-3-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076583486', N'Số khe RAM', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-a520m-s-amd-a520-am4-2-khe-ddr4-pcie-3-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076583486', N'RAM tối đa', N'64', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-a520m-s-amd-a520-am4-2-khe-ddr4-pcie-3-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076583486', N'Khe PCIe x16', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-a520m-s-amd-a520-am4-2-khe-ddr4-pcie-3-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076583486', N'Số cổng SATA khả dụng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-a520m-s-amd-a520-am4-2-khe-ddr4-pcie-3-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076583486', N'Số khe M.2 khả dụng', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-a520m-s-amd-a520-am4-2-khe-ddr4-pcie-3-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076583486', N'Kích thước M.2 hỗ trợ', N'2280;2260', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-a520m-s-amd-a520-am4-2-khe-ddr4-pcie-3-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076583486', N'Giao tiếp M.2 hỗ trợ', N'NVMe', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1076583486', N'Yêu cầu EPS 8-pin', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1076583486', N'Số cổng xuất hình', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1076583486', N'Thương hiệu', N'MSI', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-a520m-s-amd-a520-am4-2-khe-ddr4-pcie-3-0', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076583486', N'Bảo hành', N'36 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-a520m-s-amd-a520-am4-2-khe-ddr4-pcie-3-0', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076583486', N'CPU hỗ trợ', N'THNS-1052931637;THNS-1040779286;THNS-1036949461;THNS-1036949464', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-msi-pro-a520m-s-amd-a520-am4-2-khe-ddr4-pcie-3-0', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1076583486', N'CPU sẵn sàng với BIOS hiện tại', N'THNS-1052931637;THNS-1040779286;THNS-1036949461;THNS-1036949464', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-msi-pro-a520m-s-amd-a520-am4-2-khe-ddr4-pcie-3-0', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1076583486', N'Phiên bản BIOS demo', N'DEMO-UPDATED-2026', N'DEMO', N'DEMO', N'Tên phiên bản giả lập; không phải số firmware thật.'),
+        (N'THNS-1076583486', N'Thông số giả lập 1', N'DEMO: Giao tiếp M.2 hỗ trợ; Yêu cầu EPS 8-pin; Số cổng xuất hình; CPU hỗ trợ; CPU sẵn sàng với BIOS hiện tại; Phiên bản BIOS demo', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1057644780', N'Socket', N'AM4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-b450m-a-pro-max-ii', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1057644780', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-b450m-a-pro-max-ii', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1057644780', N'Form factor', N'MATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-b450m-a-pro-max-ii', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1057644780', N'Số khe RAM', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-b450m-a-pro-max-ii', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1057644780', N'RAM tối đa', N'64', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-b450m-a-pro-max-ii', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1057644780', N'Khe PCIe x16', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-b450m-a-pro-max-ii', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1057644780', N'Số cổng SATA khả dụng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-b450m-a-pro-max-ii', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1057644780', N'Số khe M.2 khả dụng', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-b450m-a-pro-max-ii', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1057644780', N'Giao tiếp M.2 hỗ trợ', N'NVMe', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1057644780', N'Kích thước M.2 hỗ trợ', N'2280', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1057644780', N'Yêu cầu EPS 8-pin', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1057644780', N'Số cổng xuất hình', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1057644780', N'Thương hiệu', N'MSI', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-msi-b450m-a-pro-max-ii', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1057644780', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-msi-b450m-a-pro-max-ii', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1057644780', N'CPU hỗ trợ', N'THNS-1052931637;THNS-1040779286;THNS-1036949461;THNS-1036949464', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-msi-b450m-a-pro-max-ii', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1057644780', N'CPU sẵn sàng với BIOS hiện tại', N'THNS-1052931637;THNS-1040779286;THNS-1036949461;THNS-1036949464', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-msi-b450m-a-pro-max-ii', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1057644780', N'Phiên bản BIOS demo', N'DEMO-UPDATED-2026', N'DEMO', N'DEMO', N'Tên phiên bản giả lập; không phải số firmware thật.'),
+        (N'THNS-1057644780', N'Thông số giả lập 1', N'DEMO: Giao tiếp M.2 hỗ trợ; Kích thước M.2 hỗ trợ; Yêu cầu EPS 8-pin; Số cổng xuất hình; CPU hỗ trợ; CPU sẵn sàng với BIOS hiện tại; Phiên bản BIOS demo', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1042671270', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-h610m-e-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1042671270', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-h610m-e-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1042671270', N'Form factor', N'MATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-h610m-e-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1042671270', N'Số khe RAM', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-h610m-e-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1042671270', N'RAM tối đa', N'64', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-h610m-e-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1042671270', N'Số cổng SATA khả dụng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-h610m-e-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1042671270', N'Số khe M.2 khả dụng', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-h610m-e-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1042671270', N'Khe PCIe x16', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1042671270', N'Giao tiếp M.2 hỗ trợ', N'NVMe', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1042671270', N'Kích thước M.2 hỗ trợ', N'2280', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1042671270', N'Yêu cầu EPS 8-pin', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1042671270', N'Số cổng xuất hình', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1042671270', N'Thương hiệu', N'MSI', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-msi-pro-h610m-e-ddr4', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1042671270', N'CPU hỗ trợ', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-msi-pro-h610m-e-ddr4', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1042671270', N'CPU sẵn sàng với BIOS hiện tại', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-msi-pro-h610m-e-ddr4', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1042671270', N'Phiên bản BIOS demo', N'DEMO-UPDATED-2026', N'DEMO', N'DEMO', N'Tên phiên bản giả lập; không phải số firmware thật.'),
+        (N'THNS-1042671270', N'Thông số giả lập 1', N'DEMO: Khe PCIe x16; Giao tiếp M.2 hỗ trợ; Kích thước M.2 hỗ trợ; Yêu cầu EPS 8-pin; Số cổng xuất hình; CPU hỗ trợ; CPU sẵn sàng với BIOS hiện tại; Phiên bản BIOS demo', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1054227494', N'Socket', N'AM4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asrock-520m-ac', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054227494', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asrock-520m-ac', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054227494', N'Form factor', N'MATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asrock-520m-ac', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054227494', N'Số khe RAM', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asrock-520m-ac', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054227494', N'RAM tối đa', N'64', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asrock-520m-ac', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054227494', N'Khe PCIe x16', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054227494', N'Số cổng SATA khả dụng', N'4', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054227494', N'Số khe M.2 khả dụng', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054227494', N'Giao tiếp M.2 hỗ trợ', N'NVMe', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054227494', N'Kích thước M.2 hỗ trợ', N'2280', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054227494', N'Yêu cầu EPS 8-pin', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054227494', N'Số cổng xuất hình', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054227494', N'Thương hiệu', N'ASRock', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-asrock-520m-ac', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1054227494', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-asrock-520m-ac', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1054227494', N'CPU hỗ trợ', N'THNS-1052931637;THNS-1040779286;THNS-1036949461;THNS-1036949464', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-asrock-520m-ac', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1054227494', N'CPU sẵn sàng với BIOS hiện tại', N'THNS-1052931637;THNS-1040779286;THNS-1036949461;THNS-1036949464', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-asrock-520m-ac', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1054227494', N'Phiên bản BIOS demo', N'DEMO-UPDATED-2026', N'DEMO', N'DEMO', N'Tên phiên bản giả lập; không phải số firmware thật.'),
+        (N'THNS-1054227494', N'Thông số giả lập 1', N'DEMO: Khe PCIe x16; Số cổng SATA khả dụng; Số khe M.2 khả dụng; Giao tiếp M.2 hỗ trợ; Kích thước M.2 hỗ trợ; Yêu cầu EPS 8-pin; Số cổng xuất hình; CPU hỗ trợ; CPU sẵn sàng với BIOS hiện tại; Phiên bản BIOS demo', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1068181034', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-k-v2-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1068181034', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-k-v2-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1068181034', N'Form factor', N'MATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-k-v2-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1068181034', N'Số khe RAM', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-k-v2-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1068181034', N'RAM tối đa', N'64', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-k-v2-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1068181034', N'Khe PCIe x16', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-k-v2-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1068181034', N'Số cổng SATA khả dụng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-k-v2-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1068181034', N'Số khe M.2 khả dụng', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-k-v2-ddr4-rev-1-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1068181034', N'Giao tiếp M.2 hỗ trợ', N'NVMe', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1068181034', N'Kích thước M.2 hỗ trợ', N'2280', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1068181034', N'Yêu cầu EPS 8-pin', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1068181034', N'Số cổng xuất hình', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1068181034', N'Thương hiệu', N'Gigabyte', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-k-v2-ddr4-rev-1-0', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1068181034', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-k-v2-ddr4-rev-1-0', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1068181034', N'CPU hỗ trợ', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-k-v2-ddr4-rev-1-0', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1068181034', N'CPU sẵn sàng với BIOS hiện tại', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-k-v2-ddr4-rev-1-0', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1068181034', N'Phiên bản BIOS demo', N'DEMO-UPDATED-2026', N'DEMO', N'DEMO', N'Tên phiên bản giả lập; không phải số firmware thật.'),
+        (N'THNS-1068181034', N'Thông số giả lập 1', N'DEMO: Giao tiếp M.2 hỗ trợ; Kích thước M.2 hỗ trợ; Yêu cầu EPS 8-pin; Số cổng xuất hình; CPU hỗ trợ; CPU sẵn sàng với BIOS hiện tại; Phiên bản BIOS demo', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1054450412', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-a-d4-csm', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054450412', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-a-d4-csm', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054450412', N'Form factor', N'MATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-a-d4-csm', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054450412', N'Số khe RAM', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-a-d4-csm', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054450412', N'RAM tối đa', N'64', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054450412', N'Khe PCIe x16', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054450412', N'Số cổng SATA khả dụng', N'4', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054450412', N'Số khe M.2 khả dụng', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054450412', N'Giao tiếp M.2 hỗ trợ', N'NVMe', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054450412', N'Kích thước M.2 hỗ trợ', N'2280', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054450412', N'Yêu cầu EPS 8-pin', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054450412', N'Số cổng xuất hình', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054450412', N'Thương hiệu', N'ASUS', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-a-d4-csm', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1054450412', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-a-d4-csm', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1054450412', N'CPU hỗ trợ', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-a-d4-csm', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1054450412', N'CPU sẵn sàng với BIOS hiện tại', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-a-d4-csm', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1054450412', N'Phiên bản BIOS demo', N'DEMO-UPDATED-2026', N'DEMO', N'DEMO', N'Tên phiên bản giả lập; không phải số firmware thật.'),
+        (N'THNS-1054450412', N'Thông số giả lập 1', N'DEMO: RAM tối đa; Khe PCIe x16; Số cổng SATA khả dụng; Số khe M.2 khả dụng; Giao tiếp M.2 hỗ trợ; Kích thước M.2 hỗ trợ; Yêu cầu EPS 8-pin; Số cổng xuất hình; CPU hỗ trợ; CPU sẵn sàng với BIOS hiện tại; Phiên bản BIOS demo', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1071856605', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-colorful-battle-ax-h610m-p-wifi-d5', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1071856605', N'Chuẩn RAM', N'DDR5', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-colorful-battle-ax-h610m-p-wifi-d5', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1071856605', N'Form factor', N'MATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-colorful-battle-ax-h610m-p-wifi-d5', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1071856605', N'Số khe RAM', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-colorful-battle-ax-h610m-p-wifi-d5', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1071856605', N'RAM tối đa', N'96', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-colorful-battle-ax-h610m-p-wifi-d5', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1071856605', N'Khe PCIe x16', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1071856605', N'Số cổng SATA khả dụng', N'4', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1071856605', N'Số khe M.2 khả dụng', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1071856605', N'Giao tiếp M.2 hỗ trợ', N'NVMe', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1071856605', N'Kích thước M.2 hỗ trợ', N'2280', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1071856605', N'Yêu cầu EPS 8-pin', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1071856605', N'Số cổng xuất hình', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1071856605', N'Thương hiệu', N'Colorful', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-colorful-battle-ax-h610m-p-wifi-d5', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1071856605', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-colorful-battle-ax-h610m-p-wifi-d5', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1071856605', N'CPU hỗ trợ', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-colorful-battle-ax-h610m-p-wifi-d5', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1071856605', N'CPU sẵn sàng với BIOS hiện tại', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-colorful-battle-ax-h610m-p-wifi-d5', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1071856605', N'Phiên bản BIOS demo', N'DEMO-UPDATED-2026', N'DEMO', N'DEMO', N'Tên phiên bản giả lập; không phải số firmware thật.'),
+        (N'THNS-1071856605', N'Thông số giả lập 1', N'DEMO: Khe PCIe x16; Số cổng SATA khả dụng; Số khe M.2 khả dụng; Giao tiếp M.2 hỗ trợ; Kích thước M.2 hỗ trợ; Yêu cầu EPS 8-pin; Số cổng xuất hình; CPU hỗ trợ; CPU sẵn sàng với BIOS hiện tại; Phiên bản BIOS demo', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1054725545', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-gaming-plus-wifi-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054725545', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-gaming-plus-wifi-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054725545', N'Form factor', N'MATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-gaming-plus-wifi-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054725545', N'Số khe RAM', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-gaming-plus-wifi-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054725545', N'RAM tối đa', N'128', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-gaming-plus-wifi-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054725545', N'Khe PCIe x16', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-gaming-plus-wifi-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054725545', N'Số cổng SATA khả dụng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-gaming-plus-wifi-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054725545', N'Số khe M.2 khả dụng', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054725545', N'Giao tiếp M.2 hỗ trợ', N'NVMe', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054725545', N'Kích thước M.2 hỗ trợ', N'2280', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054725545', N'Yêu cầu EPS 8-pin', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054725545', N'Số cổng xuất hình', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054725545', N'Thương hiệu', N'Gigabyte', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-gaming-plus-wifi-ddr4', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1054725545', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-gaming-plus-wifi-ddr4', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1054725545', N'CPU hỗ trợ', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-gaming-plus-wifi-ddr4', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1054725545', N'CPU sẵn sàng với BIOS hiện tại', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-gigabyte-b760m-gaming-plus-wifi-ddr4', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1054725545', N'Phiên bản BIOS demo', N'DEMO-UPDATED-2026', N'DEMO', N'DEMO', N'Tên phiên bản giả lập; không phải số firmware thật.'),
+        (N'THNS-1054725545', N'Thông số giả lập 1', N'DEMO: Số khe M.2 khả dụng; Giao tiếp M.2 hỗ trợ; Kích thước M.2 hỗ trợ; Yêu cầu EPS 8-pin; Số cổng xuất hình; CPU hỗ trợ; CPU sẵn sàng với BIOS hiện tại; Phiên bản BIOS demo', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1044962543', N'Socket', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-k-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1044962543', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-k-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1044962543', N'Form factor', N'MATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-k-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1044962543', N'Số khe RAM', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-k-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1044962543', N'RAM tối đa', N'64', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-k-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1044962543', N'Khe PCIe x16', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-k-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1044962543', N'Số cổng SATA khả dụng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-k-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1044962543', N'Số khe M.2 khả dụng', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-k-ddr4', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1044962543', N'Giao tiếp M.2 hỗ trợ', N'NVMe', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1044962543', N'Kích thước M.2 hỗ trợ', N'2280', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1044962543', N'Yêu cầu EPS 8-pin', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1044962543', N'Số cổng xuất hình', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1044962543', N'Thương hiệu', N'ASUS', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-k-ddr4', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1044962543', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-k-ddr4', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1044962543', N'CPU hỗ trợ', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-k-ddr4', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1044962543', N'CPU sẵn sàng với BIOS hiện tại', N'THNS-1038110471;THNS-1072199782;THNS-1051826646;THNS-1075978711;THNS-1072199780;THNS-1043309247;THNS-1073804366;THNS-1050822626;THNS-1072199781;THNS-1051827862', N'DEMO', N'https://tinhocngoisao.com/products/mainboard-asus-prime-b760m-k-ddr4', N'Allow-list GIẢ LẬP theo socket của danh mục demo; chưa đối chiếu CPU Support List/BIOS thực tế.'),
+        (N'THNS-1044962543', N'Phiên bản BIOS demo', N'DEMO-UPDATED-2026', N'DEMO', N'DEMO', N'Tên phiên bản giả lập; không phải số firmware thật.'),
+        (N'THNS-1044962543', N'Thông số giả lập 1', N'DEMO: Giao tiếp M.2 hỗ trợ; Kích thước M.2 hỗ trợ; Yêu cầu EPS 8-pin; Số cổng xuất hình; CPU hỗ trợ; CPU sẵn sàng với BIOS hiện tại; Phiên bản BIOS demo', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1064494012', N'Chiều dài', N'191', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-6g', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1064494012', N'Nguồn khuyến nghị', N'300', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-6g', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1064494012', N'TDP', N'70', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-6g', N'Công suất GPU giả lập hợp lý theo nhóm model để kiểm thử, chưa xác minh đúng bo mạch.'),
+        (N'THNS-1064494012', N'Số slot chiếm dụng', N'2', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1064494012', N'Yêu cầu PCIe 6-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-6g', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1064494012', N'Yêu cầu PCIe 8-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-6g', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1064494012', N'Yêu cầu 12V-2x6 / 12VHPWR', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-6g', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1064494012', N'Thương hiệu', N'GIGABYTE', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-6g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064494012', N'Bộ nhớ', N'6 GB GDDR6', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-6g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064494012', N'Độ phân giải', N'7680x4320', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-6g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064494012', N'Kích thước', N'191 x 111 x 36 mm', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-6g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064494012', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-6g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064494012', N'Thông số giả lập 1', N'DEMO: TDP; Số slot chiếm dụng; Yêu cầu PCIe 6-pin; Yêu cầu PCIe 8-pin; Yêu cầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1057708292', N'Chiều dài', N'201', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-radeon-rx-6500-xt-oc-edition-dual-rx6500xt-o4g-v2', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1057708292', N'Nguồn khuyến nghị', N'500', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-radeon-rx-6500-xt-oc-edition-dual-rx6500xt-o4g-v2', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1057708292', N'Yêu cầu PCIe 6-pin', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-radeon-rx-6500-xt-oc-edition-dual-rx6500xt-o4g-v2', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1057708292', N'TDP', N'145', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-radeon-rx-6500-xt-oc-edition-dual-rx6500xt-o4g-v2', N'Công suất GPU giả lập hợp lý theo nhóm model để kiểm thử, chưa xác minh đúng bo mạch.'),
+        (N'THNS-1057708292', N'Số slot chiếm dụng', N'2', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1057708292', N'Yêu cầu PCIe 8-pin', N'1', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-radeon-rx-6500-xt-oc-edition-dual-rx6500xt-o4g-v2', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1057708292', N'Yêu cầu 12V-2x6 / 12VHPWR', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-radeon-rx-6500-xt-oc-edition-dual-rx6500xt-o4g-v2', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1057708292', N'Thương hiệu', N'ASUS', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-radeon-rx-6500-xt-oc-edition-dual-rx6500xt-o4g-v2', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1057708292', N'Bộ nhớ', N'4 GB GDDR6', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-radeon-rx-6500-xt-oc-edition-dual-rx6500xt-o4g-v2', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1057708292', N'Độ phân giải', N'7680 x 4320', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-radeon-rx-6500-xt-oc-edition-dual-rx6500xt-o4g-v2', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1057708292', N'Kích thước', N'201 x 128 x 40 mm', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-radeon-rx-6500-xt-oc-edition-dual-rx6500xt-o4g-v2', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1057708292', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-radeon-rx-6500-xt-oc-edition-dual-rx6500xt-o4g-v2', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1057708292', N'Thông số giả lập 1', N'DEMO: TDP; Số slot chiếm dụng; Yêu cầu PCIe 8-pin; Yêu cầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1062006338', N'Chiều dài', N'198.1', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-8g', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1062006338', N'Nguồn khuyến nghị', N'450', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-8g', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1062006338', N'Yêu cầu PCIe 8-pin', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-8g', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1062006338', N'TDP', N'130', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-8g', N'Công suất GPU giả lập hợp lý theo nhóm model để kiểm thử, chưa xác minh đúng bo mạch.'),
+        (N'THNS-1062006338', N'Số slot chiếm dụng', N'2', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1062006338', N'Yêu cầu PCIe 6-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-8g', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1062006338', N'Yêu cầu 12V-2x6 / 12VHPWR', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-8g', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1062006338', N'Thương hiệu', N'GIGABYTE', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-8g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1062006338', N'Bộ nhớ', N'8 GB GDDR6', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-8g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1062006338', N'Độ phân giải', N'7680x4320', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-8g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1062006338', N'Kích thước', N'198.1 x 120.6 x 39 mm', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-8g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1062006338', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-gigabyte-geforce-rtx-3050-windforce-oc-v2-8g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1062006338', N'Thông số giả lập 1', N'DEMO: TDP; Số slot chiếm dụng; Yêu cầu PCIe 6-pin; Yêu cầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1063591197', N'Chiều dài', N'189', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-msi-geforce-rtx-3050-ventus-2x-e-6g-oc', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1063591197', N'Nguồn khuyến nghị', N'300', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-msi-geforce-rtx-3050-ventus-2x-e-6g-oc', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1063591197', N'TDP', N'70', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-msi-geforce-rtx-3050-ventus-2x-e-6g-oc', N'Công suất GPU giả lập hợp lý theo nhóm model để kiểm thử, chưa xác minh đúng bo mạch.'),
+        (N'THNS-1063591197', N'Số slot chiếm dụng', N'2', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1063591197', N'Yêu cầu PCIe 6-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-msi-geforce-rtx-3050-ventus-2x-e-6g-oc', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1063591197', N'Yêu cầu PCIe 8-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-msi-geforce-rtx-3050-ventus-2x-e-6g-oc', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1063591197', N'Yêu cầu 12V-2x6 / 12VHPWR', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-msi-geforce-rtx-3050-ventus-2x-e-6g-oc', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1063591197', N'Thương hiệu', N'MSI', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-msi-geforce-rtx-3050-ventus-2x-e-6g-oc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1063591197', N'Bộ nhớ', N'6 GB GDDR6', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-msi-geforce-rtx-3050-ventus-2x-e-6g-oc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1063591197', N'Độ phân giải', N'7680 x 4320', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-msi-geforce-rtx-3050-ventus-2x-e-6g-oc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1063591197', N'Kích thước', N'189 x 109 x 42 mm', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-msi-geforce-rtx-3050-ventus-2x-e-6g-oc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1063591197', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-msi-geforce-rtx-3050-ventus-2x-e-6g-oc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1063591197', N'Thông số giả lập 1', N'DEMO: TDP; Số slot chiếm dụng; Yêu cầu PCIe 6-pin; Yêu cầu PCIe 8-pin; Yêu cầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1036949763', N'Chiều dài', N'250', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1036949763', N'Nguồn khuyến nghị', N'550', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1036949763', N'TDP', N'170', N'DEMO', N'https://tinhocngoisao.com/products/vga-msi-rtx-3060-12g-gddr6-ventus-2x-oc-lhr-geforce-rtx-3060-ventus-2x-12g-oc-lhr', N'Công suất GPU giả lập hợp lý theo nhóm model để kiểm thử, chưa xác minh đúng bo mạch.'),
+        (N'THNS-1036949763', N'Số slot chiếm dụng', N'2', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1036949763', N'Yêu cầu PCIe 6-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/vga-msi-rtx-3060-12g-gddr6-ventus-2x-oc-lhr-geforce-rtx-3060-ventus-2x-12g-oc-lhr', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1036949763', N'Yêu cầu PCIe 8-pin', N'1', N'DEMO', N'https://tinhocngoisao.com/products/vga-msi-rtx-3060-12g-gddr6-ventus-2x-oc-lhr-geforce-rtx-3060-ventus-2x-12g-oc-lhr', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1036949763', N'Yêu cầu 12V-2x6 / 12VHPWR', N'0', N'DEMO', N'https://tinhocngoisao.com/products/vga-msi-rtx-3060-12g-gddr6-ventus-2x-oc-lhr-geforce-rtx-3060-ventus-2x-12g-oc-lhr', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1036949763', N'Thông số giả lập 1', N'DEMO: Chiều dài; Nguồn khuyến nghị; TDP; Số slot chiếm dụng; Yêu cầu PCIe 6-pin; Yêu cầu PCIe 8-pin; Yêu cầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1040779352', N'Chiều dài', N'165', N'NORMALIZED', N'https://tinhocngoisao.com/products/vga-asus-geforce-gt-730-2gb-ddr5-gt730-sl-2gd5-brk', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1040779352', N'Nguồn khuyến nghị', N'300', N'NORMALIZED', N'https://tinhocngoisao.com/products/vga-asus-geforce-gt-730-2gb-ddr5-gt730-sl-2gd5-brk', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1040779352', N'TDP', N'49', N'DEMO', N'https://tinhocngoisao.com/products/vga-asus-geforce-gt-730-2gb-ddr5-gt730-sl-2gd5-brk', N'Công suất GPU giả lập hợp lý theo nhóm model để kiểm thử, chưa xác minh đúng bo mạch.'),
+        (N'THNS-1040779352', N'Số slot chiếm dụng', N'2', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1040779352', N'Yêu cầu PCIe 6-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/vga-asus-geforce-gt-730-2gb-ddr5-gt730-sl-2gd5-brk', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1040779352', N'Yêu cầu PCIe 8-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/vga-asus-geforce-gt-730-2gb-ddr5-gt730-sl-2gd5-brk', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1040779352', N'Yêu cầu 12V-2x6 / 12VHPWR', N'0', N'DEMO', N'https://tinhocngoisao.com/products/vga-asus-geforce-gt-730-2gb-ddr5-gt730-sl-2gd5-brk', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1040779352', N'Thương hiệu', N'ASUS', N'SOURCED', N'https://tinhocngoisao.com/products/vga-asus-geforce-gt-730-2gb-ddr5-gt730-sl-2gd5-brk', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1040779352', N'Bộ nhớ', N'2 GB GDDR5', N'SOURCED', N'https://tinhocngoisao.com/products/vga-asus-geforce-gt-730-2gb-ddr5-gt730-sl-2gd5-brk', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1040779352', N'Độ phân giải', N'3840 x 2160', N'SOURCED', N'https://tinhocngoisao.com/products/vga-asus-geforce-gt-730-2gb-ddr5-gt730-sl-2gd5-brk', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1040779352', N'Kích thước', N'165 x 69 x 39 mm', N'SOURCED', N'https://tinhocngoisao.com/products/vga-asus-geforce-gt-730-2gb-ddr5-gt730-sl-2gd5-brk', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1040779352', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/vga-asus-geforce-gt-730-2gb-ddr5-gt730-sl-2gd5-brk', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1040779352', N'Thông số giả lập 1', N'DEMO: TDP; Số slot chiếm dụng; Yêu cầu PCIe 6-pin; Yêu cầu PCIe 8-pin; Yêu cầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1075144612', N'Chiều dài', N'197', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-msi-geforce-rtx-5060-8g-ventus-2x-oc-v1-8gb-gddr7-3840-cuda-cores-pcie-gen5', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075144612', N'Nguồn khuyến nghị', N'550', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-msi-geforce-rtx-5060-8g-ventus-2x-oc-v1-8gb-gddr7-3840-cuda-cores-pcie-gen5', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075144612', N'TDP', N'145', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-msi-geforce-rtx-5060-8g-ventus-2x-oc-v1-8gb-gddr7-3840-cuda-cores-pcie-gen5', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075144612', N'Yêu cầu PCIe 8-pin', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-msi-geforce-rtx-5060-8g-ventus-2x-oc-v1-8gb-gddr7-3840-cuda-cores-pcie-gen5', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075144612', N'Số slot chiếm dụng', N'2', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1075144612', N'Yêu cầu PCIe 6-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-msi-geforce-rtx-5060-8g-ventus-2x-oc-v1-8gb-gddr7-3840-cuda-cores-pcie-gen5', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1075144612', N'Yêu cầu 12V-2x6 / 12VHPWR', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-msi-geforce-rtx-5060-8g-ventus-2x-oc-v1-8gb-gddr7-3840-cuda-cores-pcie-gen5', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1075144612', N'Thương hiệu', N'MSI', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-msi-geforce-rtx-5060-8g-ventus-2x-oc-v1-8gb-gddr7-3840-cuda-cores-pcie-gen5', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075144612', N'Dung lượng bộ nhớ', N'8GB GDDR7', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-msi-geforce-rtx-5060-8g-ventus-2x-oc-v1-8gb-gddr7-3840-cuda-cores-pcie-gen5', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075144612', N'Bảo hành', N'36 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-msi-geforce-rtx-5060-8g-ventus-2x-oc-v1-8gb-gddr7-3840-cuda-cores-pcie-gen5', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075144612', N'Thông số giả lập 1', N'DEMO: Số slot chiếm dụng; Yêu cầu PCIe 6-pin; Yêu cầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1067308152', N'Nguồn khuyến nghị', N'450', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-gigabyte-geforce-rtx-5060-windforce-oc-8g', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1067308152', N'Yêu cầu PCIe 8-pin', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-gigabyte-geforce-rtx-5060-windforce-oc-8g', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1067308152', N'Chiều dài', N'250', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1067308152', N'TDP', N'145', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-gigabyte-geforce-rtx-5060-windforce-oc-8g', N'Công suất GPU giả lập hợp lý theo nhóm model để kiểm thử, chưa xác minh đúng bo mạch.'),
+        (N'THNS-1067308152', N'Số slot chiếm dụng', N'2', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1067308152', N'Yêu cầu PCIe 6-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-gigabyte-geforce-rtx-5060-windforce-oc-8g', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1067308152', N'Yêu cầu 12V-2x6 / 12VHPWR', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-gigabyte-geforce-rtx-5060-windforce-oc-8g', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1067308152', N'Thương hiệu', N'GIGABYTE', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-gigabyte-geforce-rtx-5060-windforce-oc-8g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1067308152', N'Bộ nhớ', N'8 GB GDDR7', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-gigabyte-geforce-rtx-5060-windforce-oc-8g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1067308152', N'Độ phân giải', N'7680x4320', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-gigabyte-geforce-rtx-5060-windforce-oc-8g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1067308152', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-gigabyte-geforce-rtx-5060-windforce-oc-8g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1067308152', N'Thông số giả lập 1', N'DEMO: Chiều dài; TDP; Số slot chiếm dụng; Yêu cầu PCIe 6-pin; Yêu cầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1073642741', N'Chiều dài', N'167', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-inno3d-geforce-gt-1030-2gb-gddr5-384-cuda-300w', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1073642741', N'Nguồn khuyến nghị', N'300', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-inno3d-geforce-gt-1030-2gb-gddr5-384-cuda-300w', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1073642741', N'TDP', N'30', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-inno3d-geforce-gt-1030-2gb-gddr5-384-cuda-300w', N'Công suất GPU giả lập hợp lý theo nhóm model để kiểm thử, chưa xác minh đúng bo mạch.'),
+        (N'THNS-1073642741', N'Số slot chiếm dụng', N'2', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1073642741', N'Yêu cầu PCIe 6-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-inno3d-geforce-gt-1030-2gb-gddr5-384-cuda-300w', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1073642741', N'Yêu cầu PCIe 8-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-inno3d-geforce-gt-1030-2gb-gddr5-384-cuda-300w', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1073642741', N'Yêu cầu 12V-2x6 / 12VHPWR', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-inno3d-geforce-gt-1030-2gb-gddr5-384-cuda-300w', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1073642741', N'Thương hiệu', N'INNO3D', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-inno3d-geforce-gt-1030-2gb-gddr5-384-cuda-300w', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073642741', N'Dung lượng bộ nhớ', N'2GB', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-inno3d-geforce-gt-1030-2gb-gddr5-384-cuda-300w', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073642741', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-inno3d-geforce-gt-1030-2gb-gddr5-384-cuda-300w', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073642741', N'Thông số giả lập 1', N'DEMO: TDP; Số slot chiếm dụng; Yêu cầu PCIe 6-pin; Yêu cầu PCIe 8-pin; Yêu cầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1053836451', N'Chiều dài', N'201', N'MANUFACTURER', N'https://www.asus.com/us/motherboards-components/graphics-cards/dual/dual-rtx3050-6g/techspec/', N'Đúng model DUAL-RTX3050-6G, không áp dụng cho bản OC/8GB.'),
+        (N'THNS-1053836451', N'Nguồn khuyến nghị', N'450', N'MANUFACTURER', N'https://www.asus.com/us/motherboards-components/graphics-cards/dual/dual-rtx3050-6g/techspec/', N'Đúng model DUAL-RTX3050-6G, không áp dụng cho bản OC/8GB.'),
+        (N'THNS-1053836451', N'TDP', N'70', N'DEMO', N'https://nguyencongpc.vn/card-man-hinh-asus-dual-rtx-3050-6gb', N'Công suất GPU giả lập hợp lý theo nhóm model để kiểm thử, chưa xác minh đúng bo mạch.'),
+        (N'THNS-1053836451', N'Số slot chiếm dụng', N'2', N'MANUFACTURER', N'https://www.asus.com/us/motherboards-components/graphics-cards/dual/dual-rtx3050-6g/techspec/', N'Đúng model DUAL-RTX3050-6G, không áp dụng cho bản OC/8GB.'),
+        (N'THNS-1053836451', N'Yêu cầu PCIe 6-pin', N'0', N'MANUFACTURER', N'https://www.asus.com/us/motherboards-components/graphics-cards/dual/dual-rtx3050-6g/techspec/', N'Đúng model DUAL-RTX3050-6G, không áp dụng cho bản OC/8GB.'),
+        (N'THNS-1053836451', N'Yêu cầu PCIe 8-pin', N'0', N'MANUFACTURER', N'https://www.asus.com/us/motherboards-components/graphics-cards/dual/dual-rtx3050-6g/techspec/', N'Đúng model DUAL-RTX3050-6G, không áp dụng cho bản OC/8GB.'),
+        (N'THNS-1053836451', N'Yêu cầu 12V-2x6 / 12VHPWR', N'0', N'MANUFACTURER', N'https://www.asus.com/us/motherboards-components/graphics-cards/dual/dual-rtx3050-6g/techspec/', N'Đúng model DUAL-RTX3050-6G, không áp dụng cho bản OC/8GB.'),
+        (N'THNS-1053836451', N'Thương hiệu', N'ASUS', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-6gb-gddr6-90yv0k61-m1na00', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053836451', N'Bộ nhớ', N'6 GB GDDR6', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-6gb-gddr6-90yv0k61-m1na00', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053836451', N'Độ phân giải', N'7680x4320', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-6gb-gddr6-90yv0k61-m1na00', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053836451', N'Kích thước', N'201 x 120 x 37 mm', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-6gb-gddr6-90yv0k61-m1na00', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053836451', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-6gb-gddr6-90yv0k61-m1na00', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053836451', N'Thông số giả lập 1', N'DEMO: TDP', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1073667329', N'Chiều dài', N'202', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-amd-asus-dual-rx-9060xt-dual-rx9060xt-16g-16gb-gddr6-2048-stream', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1073667329', N'Nguồn khuyến nghị', N'550', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-amd-asus-dual-rx-9060xt-dual-rx9060xt-16g-16gb-gddr6-2048-stream', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1073667329', N'Yêu cầu PCIe 8-pin', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-amd-asus-dual-rx-9060xt-dual-rx9060xt-16g-16gb-gddr6-2048-stream', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1073667329', N'TDP', N'145', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-amd-asus-dual-rx-9060xt-dual-rx9060xt-16g-16gb-gddr6-2048-stream', N'Công suất GPU giả lập hợp lý theo nhóm model để kiểm thử, chưa xác minh đúng bo mạch.'),
+        (N'THNS-1073667329', N'Số slot chiếm dụng', N'2', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1073667329', N'Yêu cầu PCIe 6-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-amd-asus-dual-rx-9060xt-dual-rx9060xt-16g-16gb-gddr6-2048-stream', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1073667329', N'Yêu cầu 12V-2x6 / 12VHPWR', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-amd-asus-dual-rx-9060xt-dual-rx9060xt-16g-16gb-gddr6-2048-stream', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1073667329', N'Thương hiệu', N'ASUS', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-amd-asus-dual-rx-9060xt-dual-rx9060xt-16g-16gb-gddr6-2048-stream', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073667329', N'Bộ nhớ', N'16GB GDDR6', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-amd-asus-dual-rx-9060xt-dual-rx9060xt-16g-16gb-gddr6-2048-stream', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073667329', N'Độ phân giải', N'7680 x 4320', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-amd-asus-dual-rx-9060xt-dual-rx9060xt-16g-16gb-gddr6-2048-stream', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073667329', N'Kích thước', N'202 x 120 x 49mm', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-amd-asus-dual-rx-9060xt-dual-rx9060xt-16g-16gb-gddr6-2048-stream', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073667329', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-amd-asus-dual-rx-9060xt-dual-rx9060xt-16g-16gb-gddr6-2048-stream', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073667329', N'Thông số giả lập 1', N'DEMO: TDP; Số slot chiếm dụng; Yêu cầu PCIe 6-pin; Yêu cầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1053236663', N'Chiều dài', N'201', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-oc-edition-6gb-gddr6-90yv0k60-m0na00', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1053236663', N'Nguồn khuyến nghị', N'450', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-oc-edition-6gb-gddr6-90yv0k60-m0na00', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1053236663', N'TDP', N'70', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-oc-edition-6gb-gddr6-90yv0k60-m0na00', N'Công suất GPU giả lập hợp lý theo nhóm model để kiểm thử, chưa xác minh đúng bo mạch.'),
+        (N'THNS-1053236663', N'Số slot chiếm dụng', N'2', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1053236663', N'Yêu cầu PCIe 6-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-oc-edition-6gb-gddr6-90yv0k60-m0na00', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1053236663', N'Yêu cầu PCIe 8-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-oc-edition-6gb-gddr6-90yv0k60-m0na00', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1053236663', N'Yêu cầu 12V-2x6 / 12VHPWR', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-oc-edition-6gb-gddr6-90yv0k60-m0na00', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1053236663', N'Thương hiệu', N'ASUS', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-oc-edition-6gb-gddr6-90yv0k60-m0na00', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053236663', N'Bộ nhớ', N'6 GB GDDR6', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-oc-edition-6gb-gddr6-90yv0k60-m0na00', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053236663', N'Độ phân giải', N'7680 x 4320', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-oc-edition-6gb-gddr6-90yv0k60-m0na00', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053236663', N'Kích thước', N'201x 120 x 37 mm', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-oc-edition-6gb-gddr6-90yv0k60-m0na00', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053236663', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-asus-dual-geforce-rtx-3050-oc-edition-6gb-gddr6-90yv0k60-m0na00', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053236663', N'Thông số giả lập 1', N'DEMO: TDP; Số slot chiếm dụng; Yêu cầu PCIe 6-pin; Yêu cầu PCIe 8-pin; Yêu cầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1066854146', N'Chiều dài', N'229', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-radeon-rx-7600-evo-oc-edition-8gb-gddr6', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1066854146', N'Nguồn khuyến nghị', N'550', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-radeon-rx-7600-evo-oc-edition-8gb-gddr6', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1066854146', N'Yêu cầu PCIe 8-pin', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-radeon-rx-7600-evo-oc-edition-8gb-gddr6', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1066854146', N'TDP', N'165', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-radeon-rx-7600-evo-oc-edition-8gb-gddr6', N'Công suất GPU giả lập hợp lý theo nhóm model để kiểm thử, chưa xác minh đúng bo mạch.'),
+        (N'THNS-1066854146', N'Số slot chiếm dụng', N'2', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1066854146', N'Yêu cầu PCIe 6-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-radeon-rx-7600-evo-oc-edition-8gb-gddr6', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1066854146', N'Yêu cầu 12V-2x6 / 12VHPWR', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-radeon-rx-7600-evo-oc-edition-8gb-gddr6', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1066854146', N'Thương hiệu', N'ASUS', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-radeon-rx-7600-evo-oc-edition-8gb-gddr6', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066854146', N'Bộ nhớ', N'8 GB GDDR6', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-radeon-rx-7600-evo-oc-edition-8gb-gddr6', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066854146', N'Độ phân giải', N'7680 × 4320', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-radeon-rx-7600-evo-oc-edition-8gb-gddr6', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066854146', N'Kích thước', N'229 x 123 x 49 mm', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-radeon-rx-7600-evo-oc-edition-8gb-gddr6', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066854146', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-radeon-rx-7600-evo-oc-edition-8gb-gddr6', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066854146', N'Thông số giả lập 1', N'DEMO: TDP; Số slot chiếm dụng; Yêu cầu PCIe 6-pin; Yêu cầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1064200364', N'Chiều dài', N'304.4', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-zotac-gaming-geforce-rtx-5070-solid-oc', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1064200364', N'Nguồn khuyến nghị', N'650', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-zotac-gaming-geforce-rtx-5070-solid-oc', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1064200364', N'TDP', N'250', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-zotac-gaming-geforce-rtx-5070-solid-oc', N'Công suất GPU giả lập hợp lý theo nhóm model để kiểm thử, chưa xác minh đúng bo mạch.'),
+        (N'THNS-1064200364', N'Số slot chiếm dụng', N'2', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1064200364', N'Yêu cầu PCIe 6-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-zotac-gaming-geforce-rtx-5070-solid-oc', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1064200364', N'Yêu cầu PCIe 8-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-zotac-gaming-geforce-rtx-5070-solid-oc', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1064200364', N'Yêu cầu 12V-2x6 / 12VHPWR', N'1', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-vga-zotac-gaming-geforce-rtx-5070-solid-oc', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1064200364', N'Thương hiệu', N'ZOTAC', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-zotac-gaming-geforce-rtx-5070-solid-oc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064200364', N'Bộ nhớ', N'12 GB GDDR7', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-zotac-gaming-geforce-rtx-5070-solid-oc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064200364', N'Kích thước', N'304.4 x 115.8 x 41.6 mm', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-zotac-gaming-geforce-rtx-5070-solid-oc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064200364', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-vga-zotac-gaming-geforce-rtx-5070-solid-oc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064200364', N'Thông số giả lập 1', N'DEMO: TDP; Số slot chiếm dụng; Yêu cầu PCIe 6-pin; Yêu cầu PCIe 8-pin; Yêu cầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1076765846', N'Chiều dài', N'220.5', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-zotac-gaming-geforce-rtx-5060-twin-edge-plus-8gb-gddr7-zt-b50600e2-10m-3840-cuda-2497-mhz-2-fan', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076765846', N'Nguồn khuyến nghị', N'550', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-zotac-gaming-geforce-rtx-5060-twin-edge-plus-8gb-gddr7-zt-b50600e2-10m-3840-cuda-2497-mhz-2-fan', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076765846', N'TDP', N'145', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-zotac-gaming-geforce-rtx-5060-twin-edge-plus-8gb-gddr7-zt-b50600e2-10m-3840-cuda-2497-mhz-2-fan', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076765846', N'Số slot chiếm dụng', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-zotac-gaming-geforce-rtx-5060-twin-edge-plus-8gb-gddr7-zt-b50600e2-10m-3840-cuda-2497-mhz-2-fan', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076765846', N'Yêu cầu PCIe 8-pin', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-zotac-gaming-geforce-rtx-5060-twin-edge-plus-8gb-gddr7-zt-b50600e2-10m-3840-cuda-2497-mhz-2-fan', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076765846', N'Yêu cầu PCIe 6-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-zotac-gaming-geforce-rtx-5060-twin-edge-plus-8gb-gddr7-zt-b50600e2-10m-3840-cuda-2497-mhz-2-fan', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1076765846', N'Yêu cầu 12V-2x6 / 12VHPWR', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-zotac-gaming-geforce-rtx-5060-twin-edge-plus-8gb-gddr7-zt-b50600e2-10m-3840-cuda-2497-mhz-2-fan', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1076765846', N'Thương hiệu', N'ZOTAC', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-zotac-gaming-geforce-rtx-5060-twin-edge-plus-8gb-gddr7-zt-b50600e2-10m-3840-cuda-2497-mhz-2-fan', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076765846', N'Bảo hành', N'36 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-zotac-gaming-geforce-rtx-5060-twin-edge-plus-8gb-gddr7-zt-b50600e2-10m-3840-cuda-2497-mhz-2-fan', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076765846', N'Thông số giả lập 1', N'DEMO: Yêu cầu PCIe 6-pin; Yêu cầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1075417502', N'Chiều dài', N'228', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-geforce-rtx-5060-8gb-gddr7-oc-edition-a-dual-rtx5060-o8g-a-3840-cuda-pcie-5-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075417502', N'Nguồn khuyến nghị', N'550', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-geforce-rtx-5060-8gb-gddr7-oc-edition-a-dual-rtx5060-o8g-a-3840-cuda-pcie-5-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075417502', N'Yêu cầu PCIe 8-pin', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-geforce-rtx-5060-8gb-gddr7-oc-edition-a-dual-rtx5060-o8g-a-3840-cuda-pcie-5-0', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075417502', N'TDP', N'145', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-geforce-rtx-5060-8gb-gddr7-oc-edition-a-dual-rtx5060-o8g-a-3840-cuda-pcie-5-0', N'Công suất GPU giả lập hợp lý theo nhóm model để kiểm thử, chưa xác minh đúng bo mạch.'),
+        (N'THNS-1075417502', N'Số slot chiếm dụng', N'2', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1075417502', N'Yêu cầu PCIe 6-pin', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-geforce-rtx-5060-8gb-gddr7-oc-edition-a-dual-rtx5060-o8g-a-3840-cuda-pcie-5-0', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1075417502', N'Yêu cầu 12V-2x6 / 12VHPWR', N'0', N'DEMO', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-geforce-rtx-5060-8gb-gddr7-oc-edition-a-dual-rtx5060-o8g-a-3840-cuda-pcie-5-0', N'Số đầu cấp nguồn giả lập; không xác nhận đầu cắm của đúng bo mạch.'),
+        (N'THNS-1075417502', N'Thương hiệu', N'ASUS', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-geforce-rtx-5060-8gb-gddr7-oc-edition-a-dual-rtx5060-o8g-a-3840-cuda-pcie-5-0', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075417502', N'Model', N'DUAL-RTX5060-O8G', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-geforce-rtx-5060-8gb-gddr7-oc-edition-a-dual-rtx5060-o8g-a-3840-cuda-pcie-5-0', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075417502', N'Dung lượng bộ nhớ', N'8GB GDDR7', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-geforce-rtx-5060-8gb-gddr7-oc-edition-a-dual-rtx5060-o8g-a-3840-cuda-pcie-5-0', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075417502', N'Kích thước', N'228 x 123 x 50 mm', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-geforce-rtx-5060-8gb-gddr7-oc-edition-a-dual-rtx5060-o8g-a-3840-cuda-pcie-5-0', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075417502', N'Bảo hành', N'36 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/card-man-hinh-asus-dual-geforce-rtx-5060-8gb-gddr7-oc-edition-a-dual-rtx5060-o8g-a-3840-cuda-pcie-5-0', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075417502', N'Thông số giả lập 1', N'DEMO: TDP; Số slot chiếm dụng; Yêu cầu PCIe 6-pin; Yêu cầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1075946531', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-ocpc-xt-ii-black-8gb-ddr4-1x8gb-3200mhz-cl16-intel-xmp-2-0-mmx8gd432c16u', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075946531', N'Số thanh mỗi bộ', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-ocpc-xt-ii-black-8gb-ddr4-1x8gb-3200mhz-cl16-intel-xmp-2-0-mmx8gd432c16u', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075946531', N'Dung lượng mỗi bộ', N'8', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-ocpc-xt-ii-black-8gb-ddr4-1x8gb-3200mhz-cl16-intel-xmp-2-0-mmx8gd432c16u', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075946531', N'Thương hiệu', N'OCPC', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-ocpc-xt-ii-black-8gb-ddr4-1x8gb-3200mhz-cl16-intel-xmp-2-0-mmx8gd432c16u', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075946531', N'Model', N'MMX8GD432C16U', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-ocpc-xt-ii-black-8gb-ddr4-1x8gb-3200mhz-cl16-intel-xmp-2-0-mmx8gd432c16u', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075946531', N'Tốc độ', N'3200MHz', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-ocpc-xt-ii-black-8gb-ddr4-1x8gb-3200mhz-cl16-intel-xmp-2-0-mmx8gd432c16u', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075946531', N'Độ trễ', N'CL16-20-20-40', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-ocpc-xt-ii-black-8gb-ddr4-1x8gb-3200mhz-cl16-intel-xmp-2-0-mmx8gd432c16u', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075946531', N'Dung lượng', N'8GB', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-ocpc-xt-ii-black-8gb-ddr4-1x8gb-3200mhz-cl16-intel-xmp-2-0-mmx8gd432c16u', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075946531', N'Bảo hành', N'36 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-ocpc-xt-ii-black-8gb-ddr4-1x8gb-3200mhz-cl16-intel-xmp-2-0-mmx8gd432c16u', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074536615', N'Chuẩn RAM', N'DDR5', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-vsp-16gb-ddr5-1x16gb-4800mhz-cl40-khong-tan-nhiet-intel-only', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1074536615', N'Số thanh mỗi bộ', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-vsp-16gb-ddr5-1x16gb-4800mhz-cl40-khong-tan-nhiet-intel-only', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1074536615', N'Dung lượng mỗi bộ', N'16', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-vsp-16gb-ddr5-1x16gb-4800mhz-cl40-khong-tan-nhiet-intel-only', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1074536615', N'Thương hiệu', N'VSP', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-vsp-16gb-ddr5-1x16gb-4800mhz-cl40-khong-tan-nhiet-intel-only', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074536615', N'Độ trễ', N'CL40-40-40-77', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-vsp-16gb-ddr5-1x16gb-4800mhz-cl40-khong-tan-nhiet-intel-only', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074536615', N'Dung lượng', N'16GB', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-vsp-16gb-ddr5-1x16gb-4800mhz-cl40-khong-tan-nhiet-intel-only', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074536615', N'Kích thước', N'L133mm x W30mm', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-vsp-16gb-ddr5-1x16gb-4800mhz-cl40-khong-tan-nhiet-intel-only', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074536615', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-vsp-16gb-ddr5-1x16gb-4800mhz-cl40-khong-tan-nhiet-intel-only', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075711115', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-vsp-8gb-ddr4-3200mhz-p-n-dd04-8gddr40173-udimm-cl18-tan-nhiet-nhom-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075711115', N'Dung lượng mỗi bộ', N'8', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-vsp-8gb-ddr4-3200mhz-p-n-dd04-8gddr40173-udimm-cl18-tan-nhiet-nhom-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075711115', N'Số thanh mỗi bộ', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.');
+    INSERT INTO #spec_seed (sku, attribute_name, attribute_value, source_status, source_url, source_note) VALUES
+        (N'THNS-1075711115', N'Thương hiệu', N'VSP', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-vsp-8gb-ddr4-3200mhz-p-n-dd04-8gddr40173-udimm-cl18-tan-nhiet-nhom-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075711115', N'Model', N'DDR4 PC (8GB/3200MHz)', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-vsp-8gb-ddr4-3200mhz-p-n-dd04-8gddr40173-udimm-cl18-tan-nhiet-nhom-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075711115', N'Dung lượng', N'8GB', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-vsp-8gb-ddr4-3200mhz-p-n-dd04-8gddr40173-udimm-cl18-tan-nhiet-nhom-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075711115', N'Bảo hành', N'60 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-vsp-8gb-ddr4-3200mhz-p-n-dd04-8gddr40173-udimm-cl18-tan-nhiet-nhom-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075711115', N'Thông số giả lập 1', N'DEMO: Số thanh mỗi bộ', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1071791277', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-4-8g-bus-3200-ddr4-kingmax-blade-x-tan-nhiet-km-ld4a-3200-08gsbk18', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1071791277', N'Số thanh mỗi bộ', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-4-8g-bus-3200-ddr4-kingmax-blade-x-tan-nhiet-km-ld4a-3200-08gsbk18', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1071791277', N'Dung lượng mỗi bộ', N'8', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-4-8g-bus-3200-ddr4-kingmax-blade-x-tan-nhiet-km-ld4a-3200-08gsbk18', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1071791277', N'Thương hiệu', N'KINGMAX', N'SOURCED', N'https://tinhocngoisao.com/products/ram-4-8g-bus-3200-ddr4-kingmax-blade-x-tan-nhiet-km-ld4a-3200-08gsbk18', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1071791277', N'Dung lượng', N'Ram 8 GB (1 x 8 GB)', N'SOURCED', N'https://tinhocngoisao.com/products/ram-4-8g-bus-3200-ddr4-kingmax-blade-x-tan-nhiet-km-ld4a-3200-08gsbk18', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1071791277', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/ram-4-8g-bus-3200-ddr4-kingmax-blade-x-tan-nhiet-km-ld4a-3200-08gsbk18', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076752302', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-vsp-8gb-ddr4-3200mhz-tan-nhiet-nhom-cl22-ddr4-8gnddr0188', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076752302', N'Dung lượng mỗi bộ', N'8', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-vsp-8gb-ddr4-3200mhz-tan-nhiet-nhom-cl22-ddr4-8gnddr0188', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076752302', N'Số thanh mỗi bộ', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1076752302', N'Thương hiệu', N'VSP', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-vsp-8gb-ddr4-3200mhz-tan-nhiet-nhom-cl22-ddr4-8gnddr0188', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076752302', N'Mã sản phẩm', N'DDR4-8GNDDR0188', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-vsp-8gb-ddr4-3200mhz-tan-nhiet-nhom-cl22-ddr4-8gnddr0188', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076752302', N'Độ trễ', N'CL 22', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-vsp-8gb-ddr4-3200mhz-tan-nhiet-nhom-cl22-ddr4-8gnddr0188', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076752302', N'Dung lượng', N'8GB', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-vsp-8gb-ddr4-3200mhz-tan-nhiet-nhom-cl22-ddr4-8gnddr0188', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076752302', N'Bảo hành', N'60 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-vsp-8gb-ddr4-3200mhz-tan-nhiet-nhom-cl22-ddr4-8gnddr0188', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076752302', N'Thông số giả lập 1', N'DEMO: Số thanh mỗi bộ', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1073789312', N'Chuẩn RAM', N'DDR5', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-corsair-vengeance-8gb-ddr5-5200mhz-cmk8gx5m1b5200c40-1x8gb-5200mhz', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1073789312', N'Số thanh mỗi bộ', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-corsair-vengeance-8gb-ddr5-5200mhz-cmk8gx5m1b5200c40-1x8gb-5200mhz', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1073789312', N'Dung lượng mỗi bộ', N'8', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-corsair-vengeance-8gb-ddr5-5200mhz-cmk8gx5m1b5200c40-1x8gb-5200mhz', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1073789312', N'Thương hiệu', N'CORSAIR', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-corsair-vengeance-8gb-ddr5-5200mhz-cmk8gx5m1b5200c40-1x8gb-5200mhz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073789312', N'Độ trễ', N'CL40-40-40-77', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-corsair-vengeance-8gb-ddr5-5200mhz-cmk8gx5m1b5200c40-1x8gb-5200mhz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073789312', N'Dung lượng', N'8GB', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-corsair-vengeance-8gb-ddr5-5200mhz-cmk8gx5m1b5200c40-1x8gb-5200mhz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073789312', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-corsair-vengeance-8gb-ddr5-5200mhz-cmk8gx5m1b5200c40-1x8gb-5200mhz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1047132519', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-patriot-8gb-ddr4-3200mhz-tan-nhiet-psp48g320081h1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1047132519', N'Số thanh mỗi bộ', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-patriot-8gb-ddr4-3200mhz-tan-nhiet-psp48g320081h1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1047132519', N'Dung lượng mỗi bộ', N'8', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-patriot-8gb-ddr4-3200mhz-tan-nhiet-psp48g320081h1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1047132519', N'Thương hiệu', N'PATRIOT', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-patriot-8gb-ddr4-3200mhz-tan-nhiet-psp48g320081h1', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1047132519', N'Dung lượng', N'Ram 8 GB (1 x 8 GB)', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-patriot-8gb-ddr4-3200mhz-tan-nhiet-psp48g320081h1', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1047132519', N'Bảo hành', N'60 tháng (5 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-patriot-8gb-ddr4-3200mhz-tan-nhiet-psp48g320081h1', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1070055204', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-laptop-sstc-8gb-ddr4-3200mhz-sodimm', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1070055204', N'Số thanh mỗi bộ', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-laptop-sstc-8gb-ddr4-3200mhz-sodimm', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1070055204', N'Dung lượng mỗi bộ', N'8', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-laptop-sstc-8gb-ddr4-3200mhz-sodimm', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1070055204', N'Thương hiệu', N'SSTC', N'SOURCED', N'https://tinhocngoisao.com/products/ram-laptop-sstc-8gb-ddr4-3200mhz-sodimm', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1070055204', N'Dung lượng', N'Ram 8 GB (1 x 8 GB)', N'SOURCED', N'https://tinhocngoisao.com/products/ram-laptop-sstc-8gb-ddr4-3200mhz-sodimm', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1070055204', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/ram-laptop-sstc-8gb-ddr4-3200mhz-sodimm', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1077099759', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-silicon-power-8gb-ddr4-3200mhz-udimm-90wk0000-mmr100-sp008gblfu320b02lf-1x8gb-1-2v-cl22', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1077099759', N'Số thanh mỗi bộ', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-silicon-power-8gb-ddr4-3200mhz-udimm-90wk0000-mmr100-sp008gblfu320b02lf-1x8gb-1-2v-cl22', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1077099759', N'Dung lượng mỗi bộ', N'8', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-silicon-power-8gb-ddr4-3200mhz-udimm-90wk0000-mmr100-sp008gblfu320b02lf-1x8gb-1-2v-cl22', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1077099759', N'Thương hiệu', N'Silicon Power', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-silicon-power-8gb-ddr4-3200mhz-udimm-90wk0000-mmr100-sp008gblfu320b02lf-1x8gb-1-2v-cl22', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1077099759', N'Mã sản phẩm', N'90WK0000-MMR100', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-silicon-power-8gb-ddr4-3200mhz-udimm-90wk0000-mmr100-sp008gblfu320b02lf-1x8gb-1-2v-cl22', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1077099759', N'Dung lượng bộ nhớ', N'8GB', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-silicon-power-8gb-ddr4-3200mhz-udimm-90wk0000-mmr100-sp008gblfu320b02lf-1x8gb-1-2v-cl22', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1077099759', N'Bảo hành', N'36 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-silicon-power-8gb-ddr4-3200mhz-udimm-90wk0000-mmr100-sp008gblfu320b02lf-1x8gb-1-2v-cl22', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075707488', N'Chuẩn RAM', N'DDR4', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-teamgroup-elite-plus-8gb-ddr4-3200mhz-1x8gb-cl22-tan-nhiet-nhom', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075707488', N'Số thanh mỗi bộ', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-teamgroup-elite-plus-8gb-ddr4-3200mhz-1x8gb-cl22-tan-nhiet-nhom', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075707488', N'Dung lượng mỗi bộ', N'8', N'NORMALIZED', N'https://tinhocngoisao.com/products/ram-pc-teamgroup-elite-plus-8gb-ddr4-3200mhz-1x8gb-cl22-tan-nhiet-nhom', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075707488', N'Thương hiệu', N'TeamGroup', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-teamgroup-elite-plus-8gb-ddr4-3200mhz-1x8gb-cl22-tan-nhiet-nhom', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075707488', N'Độ trễ', N'CL22-22-22-52', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-teamgroup-elite-plus-8gb-ddr4-3200mhz-1x8gb-cl22-tan-nhiet-nhom', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075707488', N'Dung lượng', N'8GB (1x8GB)', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-teamgroup-elite-plus-8gb-ddr4-3200mhz-1x8gb-cl22-tan-nhiet-nhom', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075707488', N'Kích thước', N'32(H) × 134(L) × 6.5(W) mm', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-teamgroup-elite-plus-8gb-ddr4-3200mhz-1x8gb-cl22-tan-nhiet-nhom', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075707488', N'Bảo hành', N'60 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/ram-pc-teamgroup-elite-plus-8gb-ddr4-3200mhz-1x8gb-cl22-tan-nhiet-nhom', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076074440', N'Giao tiếp', N'SATA', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-faspeed-k7-128gb-sata-k7-128g-cd-2-5-inch-sata-iii-550mb-s', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076074440', N'Form factor', N'2.5', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-faspeed-k7-128gb-sata-k7-128g-cd-2-5-inch-sata-iii-550mb-s', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076074440', N'Thương hiệu', N'Faspeed', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-faspeed-k7-128gb-sata-k7-128g-cd-2-5-inch-sata-iii-550mb-s', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076074440', N'Bộ nhớ', N'Flash memory', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-faspeed-k7-128gb-sata-k7-128g-cd-2-5-inch-sata-iii-550mb-s', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076074440', N'Bảo hành', N'36 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-faspeed-k7-128gb-sata-k7-128g-cd-2-5-inch-sata-iii-550mb-s', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1040780361', N'Giao tiếp', N'NVMe', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-512gb-patriot-p300-m2-2280-nvme-p300p512gm28', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1040780361', N'Form factor', N'M.2', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-512gb-patriot-p300-m2-2280-nvme-p300p512gm28', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1040780361', N'Kích thước M.2', N'2280', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-512gb-patriot-p300-m2-2280-nvme-p300p512gm28', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1040780361', N'Thương hiệu', N'PATRIOT', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-512gb-patriot-p300-m2-2280-nvme-p300p512gm28', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1040780361', N'Dung lượng', N'512GB', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-512gb-patriot-p300-m2-2280-nvme-p300p512gm28', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1040780361', N'Chuẩn kết nối', N'PCIe Gen3 x4 / NVMe 1.3', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-512gb-patriot-p300-m2-2280-nvme-p300p512gm28', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1040780361', N'Kích thước', N'8 cm x 2.2 cm x 0.38 cm', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-512gb-patriot-p300-m2-2280-nvme-p300p512gm28', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1040780361', N'Bảo hành', N'60 tháng (5 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-512gb-patriot-p300-m2-2280-nvme-p300p512gm28', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073363842', N'Giao tiếp', N'NVMe', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-apacer-as2280p4-256gb-pcie-gen3-x4-nvme-m-2-2280-ap256gas2280p4-1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1073363842', N'Form factor', N'M.2', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-apacer-as2280p4-256gb-pcie-gen3-x4-nvme-m-2-2280-ap256gas2280p4-1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1073363842', N'Kích thước M.2', N'2280', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-apacer-as2280p4-256gb-pcie-gen3-x4-nvme-m-2-2280-ap256gas2280p4-1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1073363842', N'Thương hiệu', N'APACER', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-apacer-as2280p4-256gb-pcie-gen3-x4-nvme-m-2-2280-ap256gas2280p4-1', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073363842', N'Dung lượng', N'256GB', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-apacer-as2280p4-256gb-pcie-gen3-x4-nvme-m-2-2280-ap256gas2280p4-1', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073363842', N'Chuẩn kết nối', N'PCIe Gen3 x4', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-apacer-as2280p4-256gb-pcie-gen3-x4-nvme-m-2-2280-ap256gas2280p4-1', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073363842', N'Kích thước', N'80 x 22 x 2.25 mm', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-apacer-as2280p4-256gb-pcie-gen3-x4-nvme-m-2-2280-ap256gas2280p4-1', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1073363842', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-apacer-as2280p4-256gb-pcie-gen3-x4-nvme-m-2-2280-ap256gas2280p4-1', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075797788', N'Giao tiếp', N'SATA', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-ocpc-xtl-200-256gb-ssd25s3t256glt-sata-iii-2-5-inch-doc-500mb-s-ghi-420mb-s', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075797788', N'Form factor', N'2.5', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-ocpc-xtl-200-256gb-ssd25s3t256glt-sata-iii-2-5-inch-doc-500mb-s-ghi-420mb-s', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075797788', N'Thương hiệu', N'OCPC', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-ocpc-xtl-200-256gb-ssd25s3t256glt-sata-iii-2-5-inch-doc-500mb-s-ghi-420mb-s', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075797788', N'Model', N'SSD25S3T256GLT', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-ocpc-xtl-200-256gb-ssd25s3t256glt-sata-iii-2-5-inch-doc-500mb-s-ghi-420mb-s', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075797788', N'Dung lượng', N'256GB', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-ocpc-xtl-200-256gb-ssd25s3t256glt-sata-iii-2-5-inch-doc-500mb-s-ghi-420mb-s', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075797788', N'Kích thước', N'2.5 inch', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-ocpc-xtl-200-256gb-ssd25s3t256glt-sata-iii-2-5-inch-doc-500mb-s-ghi-420mb-s', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075797788', N'Bảo hành', N'36 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-ocpc-xtl-200-256gb-ssd25s3t256glt-sata-iii-2-5-inch-doc-500mb-s-ghi-420mb-s', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074344794', N'Giao tiếp', N'SATA', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-sstc-m100-256gb-sata-iii-2-5', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1074344794', N'Form factor', N'2.5', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-sstc-m100-256gb-sata-iii-2-5', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1074344794', N'Thương hiệu', N'SSTC', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-sstc-m100-256gb-sata-iii-2-5', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074344794', N'Dung lượng', N'256GB', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-sstc-m100-256gb-sata-iii-2-5', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074344794', N'Chuẩn kết nối', N'SATA 6 Gb/s (tương thích SATA 3 Gb/s & SATA 1.5 Gb/s)', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-sstc-m100-256gb-sata-iii-2-5', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074344794', N'Kích thước', N'100 x 69.85 x 6.8 mm', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-sstc-m100-256gb-sata-iii-2-5', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074344794', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-sstc-m100-256gb-sata-iii-2-5', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1040779843', N'Giao tiếp', N'SATA', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-480g-kingmax-smv32-sata-iii-km480gsmv32', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1040779843', N'Form factor', N'2.5', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1040779843', N'Thông số giả lập 1', N'DEMO: Form factor', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1050166389', N'Giao tiếp', N'SATA', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-adata-su650-256gb', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1050166389', N'Form factor', N'2.5', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-adata-su650-256gb', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1050166389', N'Thương hiệu', N'ADATA', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-adata-su650-256gb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1050166389', N'Dung lượng', N'256GB', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-adata-su650-256gb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1050166389', N'Chuẩn kết nối', N'SATA3', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-adata-su650-256gb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1050166389', N'Kích thước', N'100.45 x 69.85 x 7mm', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-adata-su650-256gb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1050166389', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-adata-su650-256gb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1050167898', N'Giao tiếp', N'NVMe', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-teamgroup-mp33-512tb-pcie-gen3x4-tm8fp6512g0c101', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1050167898', N'Form factor', N'M.2', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-teamgroup-mp33-512tb-pcie-gen3x4-tm8fp6512g0c101', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1050167898', N'Kích thước M.2', N'2280', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-teamgroup-mp33-512tb-pcie-gen3x4-tm8fp6512g0c101', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1050167898', N'Thương hiệu', N'TEAMGROUP', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-teamgroup-mp33-512tb-pcie-gen3x4-tm8fp6512g0c101', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1050167898', N'Dung lượng', N'512GB', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-teamgroup-mp33-512tb-pcie-gen3x4-tm8fp6512g0c101', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1050167898', N'Chuẩn kết nối', N'NVMe PCIe 3.0 x4', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-teamgroup-mp33-512tb-pcie-gen3x4-tm8fp6512g0c101', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1050167898', N'Kích thước', N'80 x 22 x 3.8 mm', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-teamgroup-mp33-512tb-pcie-gen3x4-tm8fp6512g0c101', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1050167898', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-teamgroup-mp33-512tb-pcie-gen3x4-tm8fp6512g0c101', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1065118542', N'Giao tiếp', N'NVMe', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-hiksemi-512gb-pcie-gen-3x4-nvme', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1065118542', N'Form factor', N'M.2', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-hiksemi-512gb-pcie-gen-3x4-nvme', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1065118542', N'Kích thước M.2', N'2280', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-hiksemi-512gb-pcie-gen-3x4-nvme', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1065118542', N'Thương hiệu', N'HIKSEMI', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-hiksemi-512gb-pcie-gen-3x4-nvme', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1065118542', N'Dung lượng', N'512GB', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-hiksemi-512gb-pcie-gen-3x4-nvme', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1065118542', N'Chuẩn kết nối', N'PCIe Gen 3x4 / NVMe', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-hiksemi-512gb-pcie-gen-3x4-nvme', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1065118542', N'Kích thước', N'80.15 mm × 22.15 mm × 2.38 mm', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-hiksemi-512gb-pcie-gen-3x4-nvme', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1065118542', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-hiksemi-512gb-pcie-gen-3x4-nvme', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075737171', N'Giao tiếp', N'NVMe', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-agi-ai198r-256gb-agi256g80ai198r-cb-pcie-gen3-x4-nvme-m-2-2280-3d-nand', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075737171', N'Form factor', N'M.2', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-agi-ai198r-256gb-agi256g80ai198r-cb-pcie-gen3-x4-nvme-m-2-2280-3d-nand', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075737171', N'Kích thước M.2', N'2280', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-ssd-agi-ai198r-256gb-agi256g80ai198r-cb-pcie-gen3-x4-nvme-m-2-2280-3d-nand', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075737171', N'Thương hiệu', N'AGI', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-agi-ai198r-256gb-agi256g80ai198r-cb-pcie-gen3-x4-nvme-m-2-2280-3d-nand', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075737171', N'Model', N'AI198R (AGI256G80AI198R-CB)', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-agi-ai198r-256gb-agi256g80ai198r-cb-pcie-gen3-x4-nvme-m-2-2280-3d-nand', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075737171', N'Dung lượng', N'256GB', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-agi-ai198r-256gb-agi256g80ai198r-cb-pcie-gen3-x4-nvme-m-2-2280-3d-nand', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075737171', N'Bảo hành', N'36 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-ssd-agi-ai198r-256gb-agi256g80ai198r-cb-pcie-gen3-x4-nvme-m-2-2280-3d-nand', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036951881', N'Giao tiếp', N'SATA', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-hdd-seagate-barracuda-2-tb-sata-iii-3-5-st2000dm008', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1036951881', N'Form factor', N'3.5', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-hdd-seagate-barracuda-2-tb-sata-iii-3-5-st2000dm008', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1036951881', N'Thương hiệu', N'Seagate', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-seagate-barracuda-2-tb-sata-iii-3-5-st2000dm008', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036951881', N'Dung lượng', N'2 TB', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-seagate-barracuda-2-tb-sata-iii-3-5-st2000dm008', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036951881', N'Bảo hành', N'24 tháng (2 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-seagate-barracuda-2-tb-sata-iii-3-5-st2000dm008', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036951874', N'Giao tiếp', N'SATA', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-hdd-seagate-4tb-barracuda-chinh-hang-st4000dm004', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1036951874', N'Form factor', N'3.5', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-hdd-seagate-4tb-barracuda-chinh-hang-st4000dm004', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1036951874', N'Thương hiệu', N'Seagate', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-seagate-4tb-barracuda-chinh-hang-st4000dm004', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036951874', N'Dung lượng', N'4TB', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-seagate-4tb-barracuda-chinh-hang-st4000dm004', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036951874', N'Kích thước', N'3.5 inch', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-seagate-4tb-barracuda-chinh-hang-st4000dm004', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036951874', N'Bảo hành', N'24 tháng (2 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-seagate-4tb-barracuda-chinh-hang-st4000dm004', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1040779821', N'Giao tiếp', N'SATA', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-hdd-western-digital-blue-2-tb-sata-iii-3-5-wd20ezbx', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1040779821', N'Form factor', N'3.5', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-hdd-western-digital-blue-2-tb-sata-iii-3-5-wd20ezbx', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1040779821', N'Thương hiệu', N'WD', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-western-digital-blue-2-tb-sata-iii-3-5-wd20ezbx', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1040779821', N'Dung lượng', N'2 TB', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-western-digital-blue-2-tb-sata-iii-3-5-wd20ezbx', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1040779821', N'Bảo hành', N'24 tháng (2 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-western-digital-blue-2-tb-sata-iii-3-5-wd20ezbx', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075186625', N'Giao tiếp', N'SATA', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-hdd-4tb-seagate-ironwolf-nas-sata-iii-st4000vn006-5400rpm-256mb-cache-3-5-inch', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075186625', N'Form factor', N'3.5', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-hdd-4tb-seagate-ironwolf-nas-sata-iii-st4000vn006-5400rpm-256mb-cache-3-5-inch', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075186625', N'Thương hiệu', N'Seagate', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-4tb-seagate-ironwolf-nas-sata-iii-st4000vn006-5400rpm-256mb-cache-3-5-inch', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075186625', N'Model', N'ST4000VN006', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-4tb-seagate-ironwolf-nas-sata-iii-st4000vn006-5400rpm-256mb-cache-3-5-inch', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075186625', N'Dung lượng', N'4TB', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-4tb-seagate-ironwolf-nas-sata-iii-st4000vn006-5400rpm-256mb-cache-3-5-inch', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075186625', N'Kích thước', N'3.5 inch', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-4tb-seagate-ironwolf-nas-sata-iii-st4000vn006-5400rpm-256mb-cache-3-5-inch', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075186625', N'Bảo hành', N'36 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-4tb-seagate-ironwolf-nas-sata-iii-st4000vn006-5400rpm-256mb-cache-3-5-inch', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075186624', N'Giao tiếp', N'SATA', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-hdd-2tb-seagate-ironwolf-nas-sata-iii-st2000vn003-5400rpm-256mb-3-5-inch', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075186624', N'Form factor', N'3.5', N'NORMALIZED', N'https://tinhocngoisao.com/products/o-cung-hdd-2tb-seagate-ironwolf-nas-sata-iii-st2000vn003-5400rpm-256mb-3-5-inch', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1075186624', N'Thương hiệu', N'Seagate', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-2tb-seagate-ironwolf-nas-sata-iii-st2000vn003-5400rpm-256mb-3-5-inch', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075186624', N'Model', N'ST2000VN003', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-2tb-seagate-ironwolf-nas-sata-iii-st2000vn003-5400rpm-256mb-3-5-inch', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075186624', N'Dung lượng', N'2TB', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-2tb-seagate-ironwolf-nas-sata-iii-st2000vn003-5400rpm-256mb-3-5-inch', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075186624', N'Kích thước', N'3.5 inch', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-2tb-seagate-ironwolf-nas-sata-iii-st2000vn003-5400rpm-256mb-3-5-inch', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075186624', N'Bảo hành', N'36 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/o-cung-hdd-2tb-seagate-ironwolf-nas-sata-iii-st2000vn003-5400rpm-256mb-3-5-inch', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1047452667', N'Công suất', N'750', N'NORMALIZED', N'https://tinhocngoisao.com/products/nguon-may-tinh-750w-jetek-j-series-750w-plus-st750-atx-12v-pfc-ean-0-bh-36t-bao-hanh-doi-trong-1-gio', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1047452667', N'Form factor', N'ATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/nguon-may-tinh-750w-jetek-j-series-750w-plus-st750-atx-12v-pfc-ean-0-bh-36t-bao-hanh-doi-trong-1-gio', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1047452667', N'Chiều dài', N'140', N'NORMALIZED', N'https://tinhocngoisao.com/products/nguon-may-tinh-750w-jetek-j-series-750w-plus-st750-atx-12v-pfc-ean-0-bh-36t-bao-hanh-doi-trong-1-gio', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1047452667', N'Số đầu PCIe 8-pin', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/nguon-may-tinh-750w-jetek-j-series-750w-plus-st750-atx-12v-pfc-ean-0-bh-36t-bao-hanh-doi-trong-1-gio', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1047452667', N'Số đầu EPS 8-pin', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/nguon-may-tinh-750w-jetek-j-series-750w-plus-st750-atx-12v-pfc-ean-0-bh-36t-bao-hanh-doi-trong-1-gio', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1047452667', N'Số đầu PCIe 6-pin', N'0', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1047452667', N'Số đầu 12V-2x6 / 12VHPWR', N'0', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1047452667', N'Hãng', N'Jetek', N'SOURCED', N'https://tinhocngoisao.com/products/nguon-may-tinh-750w-jetek-j-series-750w-plus-st750-atx-12v-pfc-ean-0-bh-36t-bao-hanh-doi-trong-1-gio', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1047452667', N'Kích thước', N'140 x 150 x 86 mm', N'SOURCED', N'https://tinhocngoisao.com/products/nguon-may-tinh-750w-jetek-j-series-750w-plus-st750-atx-12v-pfc-ean-0-bh-36t-bao-hanh-doi-trong-1-gio', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1047452667', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/nguon-may-tinh-750w-jetek-j-series-750w-plus-st750-atx-12v-pfc-ean-0-bh-36t-bao-hanh-doi-trong-1-gio', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1047452667', N'Thông số giả lập 1', N'DEMO: Số đầu PCIe 6-pin; Số đầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1074771647', N'Công suất', N'450', N'NORMALIZED', N'https://tinhocngoisao.com/products/nguon-may-tinh-antec-atom-zen-450-230v-ac-v1000n712gc-22-450w-120mm-silent-fan-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1074771647', N'Form factor', N'ATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/nguon-may-tinh-antec-atom-zen-450-230v-ac-v1000n712gc-22-450w-120mm-silent-fan-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1074771647', N'Chiều dài', N'140', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1074771647', N'Số đầu PCIe 6-pin', N'0', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1074771647', N'Số đầu PCIe 8-pin', N'2', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1074771647', N'Số đầu EPS 8-pin', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1074771647', N'Số đầu 12V-2x6 / 12VHPWR', N'0', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1074771647', N'Thương hiệu', N'Antec', N'SOURCED', N'https://tinhocngoisao.com/products/nguon-may-tinh-antec-atom-zen-450-230v-ac-v1000n712gc-22-450w-120mm-silent-fan-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074771647', N'Model', N'Atom ZEN 450', N'SOURCED', N'https://tinhocngoisao.com/products/nguon-may-tinh-antec-atom-zen-450-230v-ac-v1000n712gc-22-450w-120mm-silent-fan-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074771647', N'Bảo hành', N'36 tháng (Đổi mới trong 1 giờ)', N'SOURCED', N'https://tinhocngoisao.com/products/nguon-may-tinh-antec-atom-zen-450-230v-ac-v1000n712gc-22-450w-120mm-silent-fan-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074771647', N'Thông số giả lập 1', N'DEMO: Chiều dài; Số đầu PCIe 6-pin; Số đầu PCIe 8-pin; Số đầu EPS 8-pin; Số đầu 12V-2x6 / 12VHPWR', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1076589514', N'Mainboard hỗ trợ', N'MATX;ITX', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-star-office-cs600-micro-atx-mini-itx-usb-3-0-kem-san-1-fan-90mm-thep-0-8mm-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076589514', N'Chiều dài VGA tối đa', N'260', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-star-office-cs600-micro-atx-mini-itx-usb-3-0-kem-san-1-fan-90mm-thep-0-8mm-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076589514', N'Chiều cao tản tối đa', N'135', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-star-office-cs600-micro-atx-mini-itx-usb-3-0-kem-san-1-fan-90mm-thep-0-8mm-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076589514', N'Số slot mở rộng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-star-office-cs600-micro-atx-mini-itx-usb-3-0-kem-san-1-fan-90mm-thep-0-8mm-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076589514', N'Nguồn hỗ trợ', N'ATX', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1076589514', N'Chiều dài nguồn tối đa', N'160', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1076589514', N'Radiator hỗ trợ', N'240mm', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1076589514', N'Khay 2.5 khả dụng', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-star-office-cs600-micro-atx-mini-itx-usb-3-0-kem-san-1-fan-90mm-thep-0-8mm-den', N'Cửa hàng công bố 2 x SSD 2.5 và 2 x HDD 3.5.'),
+        (N'THNS-1076589514', N'Khay 3.5 khả dụng', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-star-office-cs600-micro-atx-mini-itx-usb-3-0-kem-san-1-fan-90mm-thep-0-8mm-den', N'Cửa hàng công bố 2 x SSD 2.5 và 2 x HDD 3.5.'),
+        (N'THNS-1076589514', N'Chiều dài VGA khi lắp radiator', N'205.0', N'DEMO', N'DEMO', N'Giả lập lắp radiator trước dày 27mm + quạt 25mm + dự phòng 3mm. Không phải kích thước xác minh của case.'),
+        (N'THNS-1076589514', N'Thương hiệu', N'STAR', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-star-office-cs600-micro-atx-mini-itx-usb-3-0-kem-san-1-fan-90mm-thep-0-8mm-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076589514', N'Mã sản phẩm', N'CS600', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-star-office-cs600-micro-atx-mini-itx-usb-3-0-kem-san-1-fan-90mm-thep-0-8mm-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076589514', N'Bảo hành', N'12 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-star-office-cs600-micro-atx-mini-itx-usb-3-0-kem-san-1-fan-90mm-thep-0-8mm-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076589514', N'Thông số giả lập 1', N'DEMO: Nguồn hỗ trợ; Chiều dài nguồn tối đa; Radiator hỗ trợ; Chiều dài VGA khi lắp radiator', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1072070092', N'Mainboard hỗ trợ', N'MATX;ITX', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-gaming-linktech-bahamut-m-4f-m-atx-kem-san-4-fan-fixed-rgb-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072070092', N'Chiều dài nguồn tối đa', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-gaming-linktech-bahamut-m-4f-m-atx-kem-san-4-fan-fixed-rgb-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072070092', N'Chiều dài VGA tối đa', N'280', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-gaming-linktech-bahamut-m-4f-m-atx-kem-san-4-fan-fixed-rgb-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072070092', N'Chiều cao tản tối đa', N'165', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-gaming-linktech-bahamut-m-4f-m-atx-kem-san-4-fan-fixed-rgb-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072070092', N'Số slot mở rộng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-gaming-linktech-bahamut-m-4f-m-atx-kem-san-4-fan-fixed-rgb-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072070092', N'Khay 2.5 khả dụng', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-gaming-linktech-bahamut-m-4f-m-atx-kem-san-4-fan-fixed-rgb-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072070092', N'Khay 3.5 khả dụng', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-gaming-linktech-bahamut-m-4f-m-atx-kem-san-4-fan-fixed-rgb-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072070092', N'Nguồn hỗ trợ', N'ATX', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1072070092', N'Radiator hỗ trợ', N'240mm', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1072070092', N'Chiều dài VGA khi lắp radiator', N'225.0', N'DEMO', N'DEMO', N'Giả lập lắp radiator trước dày 27mm + quạt 25mm + dự phòng 3mm. Không phải kích thước xác minh của case.'),
+        (N'THNS-1072070092', N'Hãng', N'LinkTech', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-gaming-linktech-bahamut-m-4f-m-atx-kem-san-4-fan-fixed-rgb-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1072070092', N'Kích thước', N'448mm x 243mm x 373mm (Carton); 320mm x 195mm x 395mm (Chassis); Mini ATX', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-gaming-linktech-bahamut-m-4f-m-atx-kem-san-4-fan-fixed-rgb-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1072070092', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-gaming-linktech-bahamut-m-4f-m-atx-kem-san-4-fan-fixed-rgb-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1072070092', N'Thông số giả lập 1', N'DEMO: Nguồn hỗ trợ; Radiator hỗ trợ; Chiều dài VGA khi lắp radiator', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1064365486', N'Mainboard hỗ trợ', N'ATX;MATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/case-sama-a302', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1064365486', N'Chiều dài VGA tối đa', N'290', N'NORMALIZED', N'https://tinhocngoisao.com/products/case-sama-a302', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1064365486', N'Chiều cao tản tối đa', N'160', N'NORMALIZED', N'https://tinhocngoisao.com/products/case-sama-a302', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1064365486', N'Khay 2.5 khả dụng', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/case-sama-a302', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1064365486', N'Khay 3.5 khả dụng', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/case-sama-a302', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1064365486', N'Nguồn hỗ trợ', N'ATX', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1064365486', N'Chiều dài nguồn tối đa', N'160', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1064365486', N'Số slot mở rộng', N'4', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1064365486', N'Radiator hỗ trợ', N'240mm', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1064365486', N'Chiều dài VGA khi lắp radiator', N'235.0', N'DEMO', N'DEMO', N'Giả lập lắp radiator trước dày 27mm + quạt 25mm + dự phòng 3mm. Không phải kích thước xác minh của case.'),
+        (N'THNS-1064365486', N'Hãng', N'Sama', N'SOURCED', N'https://tinhocngoisao.com/products/case-sama-a302', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064365486', N'Kích thước', N'335 x 196 x 410 mm', N'SOURCED', N'https://tinhocngoisao.com/products/case-sama-a302', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064365486', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/case-sama-a302', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064365486', N'Thông số giả lập 1', N'DEMO: Nguồn hỗ trợ; Chiều dài nguồn tối đa; Số slot mở rộng; Radiator hỗ trợ; Chiều dài VGA khi lắp radiator', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1054584091', N'Mainboard hỗ trợ', N'ITX', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-nzxt-h210i-den-trang-mini-itx-nhap-khau-ca-h210i-w1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054584091', N'Chiều dài VGA tối đa', N'325', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-nzxt-h210i-den-trang-mini-itx-nhap-khau-ca-h210i-w1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054584091', N'Chiều cao tản tối đa', N'165', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-nzxt-h210i-den-trang-mini-itx-nhap-khau-ca-h210i-w1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054584091', N'Số slot mở rộng', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-nzxt-h210i-den-trang-mini-itx-nhap-khau-ca-h210i-w1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054584091', N'Khay 2.5 khả dụng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-nzxt-h210i-den-trang-mini-itx-nhap-khau-ca-h210i-w1', N'Cộng 3+1 vị trí 2.5 theo trường Khe ổ cứng; cần đối chiếu vị trí khi lắp thực tế.'),
+        (N'THNS-1054584091', N'Khay 3.5 khả dụng', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-nzxt-h210i-den-trang-mini-itx-nhap-khau-ca-h210i-w1', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1054584091', N'Nguồn hỗ trợ', N'ATX', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054584091', N'Chiều dài nguồn tối đa', N'160', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054584091', N'Radiator hỗ trợ', N'240mm', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1054584091', N'Chiều dài VGA khi lắp radiator', N'270.0', N'DEMO', N'DEMO', N'Giả lập lắp radiator trước dày 27mm + quạt 25mm + dự phòng 3mm. Không phải kích thước xác minh của case.'),
+        (N'THNS-1054584091', N'Hãng', N'NZXT', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-case-nzxt-h210i-den-trang-mini-itx-nhap-khau-ca-h210i-w1', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1054584091', N'Kích thước', N'349 x 210 x 372 mm', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-case-nzxt-h210i-den-trang-mini-itx-nhap-khau-ca-h210i-w1', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1054584091', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-case-nzxt-h210i-den-trang-mini-itx-nhap-khau-ca-h210i-w1', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1054584091', N'Thông số giả lập 1', N'DEMO: Nguồn hỗ trợ; Chiều dài nguồn tối đa; Radiator hỗ trợ; Chiều dài VGA khi lắp radiator', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1036949991', N'Mainboard hỗ trợ', N'ATX;MATX;ITX', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-xigmatek-xa-22-en47567-no-fan', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1036949991', N'Chiều dài VGA tối đa', N'330', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-xigmatek-xa-22-en47567-no-fan', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1036949991', N'Chiều cao tản tối đa', N'154', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-xigmatek-xa-22-en47567-no-fan', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1036949991', N'Số slot mở rộng', N'7', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-xigmatek-xa-22-en47567-no-fan', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1036949991', N'Nguồn hỗ trợ', N'ATX', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1036949991', N'Chiều dài nguồn tối đa', N'160', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1036949991', N'Radiator hỗ trợ', N'240mm', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1036949991', N'Khay 2.5 khả dụng', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1036949991', N'Khay 3.5 khả dụng', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1036949991', N'Chiều dài VGA khi lắp radiator', N'275.0', N'DEMO', N'DEMO', N'Giả lập lắp radiator trước dày 27mm + quạt 25mm + dự phòng 3mm. Không phải kích thước xác minh của case.'),
+        (N'THNS-1036949991', N'Hãng', N'Xigmatek', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-case-xigmatek-xa-22-en47567-no-fan', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036949991', N'Kích thước', N'370 x 188 x 413 mm', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-case-xigmatek-xa-22-en47567-no-fan', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036949991', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-case-xigmatek-xa-22-en47567-no-fan', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036949991', N'Thông số giả lập 1', N'DEMO: Nguồn hỗ trợ; Chiều dài nguồn tối đa; Radiator hỗ trợ; Khay 2.5 khả dụng; Khay 3.5 khả dụng; Chiều dài VGA khi lắp radiator', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1072582820', N'Mainboard hỗ trợ', N'MATX;ITX', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-magic-m-07-m-atx-itx', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072582820', N'Chiều dài nguồn tối đa', N'150', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-magic-m-07-m-atx-itx', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072582820', N'Chiều dài VGA tối đa', N'220', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-magic-m-07-m-atx-itx', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072582820', N'Chiều cao tản tối đa', N'145', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-magic-m-07-m-atx-itx', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072582820', N'Số slot mở rộng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-magic-m-07-m-atx-itx', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072582820', N'Khay 2.5 khả dụng', N'1', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-magic-m-07-m-atx-itx', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072582820', N'Khay 3.5 khả dụng', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-magic-m-07-m-atx-itx', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1072582820', N'Nguồn hỗ trợ', N'ATX', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1072582820', N'Radiator hỗ trợ', N'240mm', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1072582820', N'Chiều dài VGA khi lắp radiator', N'165.0', N'DEMO', N'DEMO', N'Giả lập lắp radiator trước dày 27mm + quạt 25mm + dự phòng 3mm. Không phải kích thước xác minh của case.'),
+        (N'THNS-1072582820', N'Hãng', N'Magic', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-magic-m-07-m-atx-itx', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1072582820', N'Kích thước', N'377 x 195 x 399 mm; Mini ATX', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-magic-m-07-m-atx-itx', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1072582820', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-magic-m-07-m-atx-itx', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1072582820', N'Thông số giả lập 1', N'DEMO: Nguồn hỗ trợ; Radiator hỗ trợ; Chiều dài VGA khi lắp radiator', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1062472524', N'Mainboard hỗ trợ', N'ATX;mATX;ITX', N'DEMO', N'https://tinhocngoisao.com/products/thung-may-case-antec-c3-basic-atx-khong-kem-fan-ho-ca-mau-den', N'Danh sách kích thước mainboard giả lập; tiêu đề ATX không phải danh sách đầy đủ.'),
+        (N'THNS-1062472524', N'Nguồn hỗ trợ', N'ATX', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1062472524', N'Chiều dài nguồn tối đa', N'160', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1062472524', N'Chiều dài VGA tối đa', N'300', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1062472524', N'Số slot mở rộng', N'4', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1062472524', N'Chiều cao tản tối đa', N'155', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1062472524', N'Radiator hỗ trợ', N'240mm', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1062472524', N'Khay 2.5 khả dụng', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1062472524', N'Khay 3.5 khả dụng', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1062472524', N'Chiều dài VGA khi lắp radiator', N'245.0', N'DEMO', N'DEMO', N'Giả lập lắp radiator trước dày 27mm + quạt 25mm + dự phòng 3mm. Không phải kích thước xác minh của case.'),
+        (N'THNS-1062472524', N'Thông số giả lập 1', N'DEMO: Mainboard hỗ trợ; Nguồn hỗ trợ; Chiều dài nguồn tối đa; Chiều dài VGA tối đa; Số slot mở rộng; Chiều cao tản tối đa; Radiator hỗ trợ; Khay 2.5 khả dụng; Khay 3.5 khả dụng; Chiều dài VGA khi lắp radiator', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1076607525', N'Mainboard hỗ trợ', N'MATX;ITX', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-xigmatek-dynamic-ml-m-atx-khong-kem-fan-en91134-micro-atx-mini-itx-gpu-410mm-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076607525', N'Nguồn hỗ trợ', N'ATX', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-xigmatek-dynamic-ml-m-atx-khong-kem-fan-en91134-micro-atx-mini-itx-gpu-410mm-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076607525', N'Chiều dài nguồn tối đa', N'220', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-xigmatek-dynamic-ml-m-atx-khong-kem-fan-en91134-micro-atx-mini-itx-gpu-410mm-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076607525', N'Chiều dài VGA tối đa', N'410', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-xigmatek-dynamic-ml-m-atx-khong-kem-fan-en91134-micro-atx-mini-itx-gpu-410mm-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076607525', N'Chiều cao tản tối đa', N'165', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-xigmatek-dynamic-ml-m-atx-khong-kem-fan-en91134-micro-atx-mini-itx-gpu-410mm-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076607525', N'Số slot mở rộng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-xigmatek-dynamic-ml-m-atx-khong-kem-fan-en91134-micro-atx-mini-itx-gpu-410mm-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076607525', N'Radiator hỗ trợ', N'120mm;240mm;360mm;280mm', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-xigmatek-dynamic-ml-m-atx-khong-kem-fan-en91134-micro-atx-mini-itx-gpu-410mm-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1076607525', N'Khay 2.5 khả dụng', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1076607525', N'Khay 3.5 khả dụng', N'1', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1076607525', N'Chiều dài VGA khi lắp radiator', N'355.0', N'DEMO', N'DEMO', N'Giả lập lắp radiator trước dày 27mm + quạt 25mm + dự phòng 3mm. Không phải kích thước xác minh của case.'),
+        (N'THNS-1076607525', N'Thương hiệu', N'Xigmatek', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-xigmatek-dynamic-ml-m-atx-khong-kem-fan-en91134-micro-atx-mini-itx-gpu-410mm-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076607525', N'Kích thước', N'425 × 281 × 360 mm (D × R × C)', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-xigmatek-dynamic-ml-m-atx-khong-kem-fan-en91134-micro-atx-mini-itx-gpu-410mm-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076607525', N'Bảo hành', N'12 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-xigmatek-dynamic-ml-m-atx-khong-kem-fan-en91134-micro-atx-mini-itx-gpu-410mm-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076607525', N'Thông số giả lập 1', N'DEMO: Khay 2.5 khả dụng; Khay 3.5 khả dụng; Chiều dài VGA khi lắp radiator', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1051536556', N'Mainboard hỗ trợ', N'MATX;ITX', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-mik-morax-3fa-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1051536556', N'Chiều dài nguồn tối đa', N'160', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-mik-morax-3fa-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1051536556', N'Chiều dài VGA tối đa', N'330', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-mik-morax-3fa-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1051536556', N'Chiều cao tản tối đa', N'175', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-mik-morax-3fa-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1051536556', N'Số slot mở rộng', N'4', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-mik-morax-3fa-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1051536556', N'Khay 2.5 khả dụng', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-mik-morax-3fa-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1051536556', N'Khay 3.5 khả dụng', N'2', N'NORMALIZED', N'https://tinhocngoisao.com/products/thung-may-case-mik-morax-3fa-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1051536556', N'Nguồn hỗ trợ', N'ATX', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1051536556', N'Radiator hỗ trợ', N'240mm', N'DEMO', N'DEMO', N'Giá trị giả lập phục vụ kiểm thử đồ án; không phải thông số đã xác minh.'),
+        (N'THNS-1051536556', N'Chiều dài VGA khi lắp radiator', N'275.0', N'DEMO', N'DEMO', N'Giả lập lắp radiator trước dày 27mm + quạt 25mm + dự phòng 3mm. Không phải kích thước xác minh của case.'),
+        (N'THNS-1051536556', N'Hãng', N'MIK', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-case-mik-morax-3fa-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051536556', N'Kích thước', N'365 x 216 x 405 mm', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-case-mik-morax-3fa-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051536556', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/thung-may-case-mik-morax-3fa-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051536556', N'Thông số giả lập 1', N'DEMO: Nguồn hỗ trợ; Radiator hỗ trợ; Chiều dài VGA khi lắp radiator', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1042470721', N'Socket hỗ trợ', N'LGA1700', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-linh-kien-cpu-intel-12th-socket-1700', N'Socket 1700 ghi rõ trên tên sản phẩm.'),
+        (N'THNS-1042470721', N'Chiều cao', N'47', N'DEMO', N'https://tinhocngoisao.com/products/tan-nhiet-linh-kien-cpu-intel-12th-socket-1700', N'Chiều cao lắp ráp giả lập; dữ liệu cửa hàng không phân biệt chắc chắn kích thước quạt/tháp/toàn bộ.'),
+        (N'THNS-1042470721', N'Thương hiệu', N'Intel', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-linh-kien-cpu-intel-12th-socket-1700', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1042470721', N'Bảo hành', N'3 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-linh-kien-cpu-intel-12th-socket-1700', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1042470721', N'Thông số giả lập 1', N'DEMO: Chiều cao', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1036953689', N'Socket hỗ trợ', N'AM4;AM3;AM2;FM2;FM1;LGA1700;LGA1200;LGA1150;LGA1151;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-a220-fan-92mm-led-rgb-fixed-1200-1700-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1036953689', N'Chiều cao', N'125', N'DEMO', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-a220-fan-92mm-led-rgb-fixed-1200-1700-den', N'Chiều cao lắp ráp giả lập; dữ liệu cửa hàng không phân biệt chắc chắn kích thước quạt/tháp/toàn bộ.'),
+        (N'THNS-1036953689', N'Thương hiệu', N'Jungle Leopard', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-a220-fan-92mm-led-rgb-fixed-1200-1700-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036953689', N'Kích thước', N'Quạt: 90 × 90 × 25 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-a220-fan-92mm-led-rgb-fixed-1200-1700-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036953689', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-a220-fan-92mm-led-rgb-fixed-1200-1700-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036953689', N'Thông số giả lập 1', N'DEMO: Chiều cao', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1055609408', N'Socket hỗ trợ', N'FM1;FM2;AM2;AM3;AM4;LGA1200;LGA2011;LGA2066;LGA1150;LGA1151;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k400-rgb-black-support-2011', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1055609408', N'Chiều cao', N'160', N'DEMO', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k400-rgb-black-support-2011', N'Chiều cao lắp ráp giả lập; dữ liệu cửa hàng không phân biệt chắc chắn kích thước quạt/tháp/toàn bộ.'),
+        (N'THNS-1055609408', N'Thương hiệu', N'Leopard', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k400-rgb-black-support-2011', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1055609408', N'Kích thước', N'92 x 92 x 160 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k400-rgb-black-support-2011', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1055609408', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k400-rgb-black-support-2011', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1055609408', N'Thông số giả lập 1', N'DEMO: Chiều cao', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1047042338', N'Socket hỗ trợ', N'LGA1200;LGA2011;LGA2066;FM1;FM2;AM2;AM3;AM4;LGA1150;LGA1151;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-cpu-jonsbo-cr-1000-evo-rgb-black', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1047042338', N'Chiều cao', N'160', N'DEMO', N'https://tinhocngoisao.com/products/tan-nhiet-khi-cpu-jonsbo-cr-1000-evo-rgb-black', N'Chiều cao lắp ráp giả lập; dữ liệu cửa hàng không phân biệt chắc chắn kích thước quạt/tháp/toàn bộ.'),
+        (N'THNS-1047042338', N'Thương hiệu', N'Jonsbo', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-cpu-jonsbo-cr-1000-evo-rgb-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1047042338', N'Kích thước', N'120 x 120 x 160 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-cpu-jonsbo-cr-1000-evo-rgb-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1047042338', N'Bảo hành', N'3 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-cpu-jonsbo-cr-1000-evo-rgb-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1047042338', N'Thông số giả lập 1', N'DEMO: Chiều cao', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1067006661', N'Socket hỗ trợ', N'LGA1200;LGA2011;LGA2066;FM1;FM2;AM2;AM3;AM4;LGA1150;LGA1151;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k400-pro-rgb-dual-fan-support-2011', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1067006661', N'Chiều cao', N'160', N'DEMO', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k400-pro-rgb-dual-fan-support-2011', N'Chiều cao lắp ráp giả lập; dữ liệu cửa hàng không phân biệt chắc chắn kích thước quạt/tháp/toàn bộ.'),
+        (N'THNS-1067006661', N'Thương hiệu', N'Leopard', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k400-pro-rgb-dual-fan-support-2011', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1067006661', N'Kích thước', N'120 x 120 x 160 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k400-pro-rgb-dual-fan-support-2011', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1067006661', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k400-pro-rgb-dual-fan-support-2011', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1067006661', N'Thông số giả lập 1', N'DEMO: Chiều cao', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1036954057', N'Socket hỗ trợ', N'LGA1200;FM1;FM2;AM2;AM3;AM4;AM5;LGA1150;LGA1151;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-cpu-jonsbo-cr-1200-rgb-cooling-air', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1036954057', N'Chiều cao', N'160', N'DEMO', N'https://tinhocngoisao.com/products/tan-nhiet-cpu-jonsbo-cr-1200-rgb-cooling-air', N'Chiều cao lắp ráp giả lập; dữ liệu cửa hàng không phân biệt chắc chắn kích thước quạt/tháp/toàn bộ.'),
+        (N'THNS-1036954057', N'Thương hiệu', N'Jonsbo', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-cpu-jonsbo-cr-1200-rgb-cooling-air', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036954057', N'Kích thước', N'92 x 92 x 160 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-cpu-jonsbo-cr-1200-rgb-cooling-air', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036954057', N'Bảo hành', N'3 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-cpu-jonsbo-cr-1200-rgb-cooling-air', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036954057', N'Thông số giả lập 1', N'DEMO: Chiều cao', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1065099770', N'Socket hỗ trợ', N'LGA1200;LGA2011;FM1;FM2;AM2;AM3;AM4;LGA1150;LGA1151;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k420e-digital-led-argb-ho-tro-socket-2011-mau-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1065099770', N'Chiều cao', N'160', N'DEMO', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k420e-digital-led-argb-ho-tro-socket-2011-mau-den', N'Chiều cao lắp ráp giả lập; dữ liệu cửa hàng không phân biệt chắc chắn kích thước quạt/tháp/toàn bộ.'),
+        (N'THNS-1065099770', N'Thương hiệu', N'Leopard', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k420e-digital-led-argb-ho-tro-socket-2011-mau-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1065099770', N'Kích thước', N'92 x 92 x 160 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k420e-digital-led-argb-ho-tro-socket-2011-mau-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1065099770', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-leopard-k420e-digital-led-argb-ho-tro-socket-2011-mau-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1065099770', N'Thông số giả lập 1', N'DEMO: Chiều cao', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1051114701', N'Socket hỗ trợ', N'FM1;FM2;AM2;AM3;AM4;LGA1200;LGA2011;LGA2066;LGA1150;LGA1151;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-thermalright-assassin-king-120-se-black', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1051114701', N'Chiều cao', N'148', N'DEMO', N'https://tinhocngoisao.com/products/tan-nhiet-khi-thermalright-assassin-king-120-se-black', N'Chiều cao lắp ráp giả lập; dữ liệu cửa hàng không phân biệt chắc chắn kích thước quạt/tháp/toàn bộ.'),
+        (N'THNS-1051114701', N'Thương hiệu', N'Thermalright', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-thermalright-assassin-king-120-se-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051114701', N'Kích thước', N'150 x 130 x 160 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-thermalright-assassin-king-120-se-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051114701', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-khi-thermalright-assassin-king-120-se-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051114701', N'Thông số giả lập 1', N'DEMO: Chiều cao', N'DEMO', N'DEMO', N'Các trường được liệt kê là giả lập cho đồ án, không được coi là thông số thật.'),
+        (N'THNS-1052824050', N'Socket hỗ trợ', N'FM1;FM2;AM2;AM3;AM4;LGA1200;LGA2011;LGA2066;LGA1150;LGA1151;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-tk1-den-240mm-rgb-fixed', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1052824050', N'Kích thước radiator', N'240mm', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-tk1-den-240mm-rgb-fixed', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1052824050', N'Thương hiệu', N'Leopard', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-tk1-den-240mm-rgb-fixed', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1052824050', N'Kích thước', N'274 x 120 x 27 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-tk1-den-240mm-rgb-fixed', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1052824050', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-tk1-den-240mm-rgb-fixed', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1055609203', N'Socket hỗ trợ', N'FM1;FM2;AM2;AM3;AM4;AM5;LGA1200;LGA2011;LGA2066;LGA1150;LGA1151;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-astrobeat-360-digital-argb-black', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1055609203', N'Kích thước radiator', N'360mm', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-astrobeat-360-digital-argb-black', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1055609203', N'Thương hiệu', N'Leopard', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-astrobeat-360-digital-argb-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1055609203', N'Kích thước', N'396 x 120 x 27 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-astrobeat-360-digital-argb-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1055609203', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-astrobeat-360-digital-argb-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1052824048', N'Socket hỗ trợ', N'FM1;FM2;AM2;AM3;AM4;AM5;LGA1200;LGA2011;LGA2066;LGA1150;LGA1151;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-tk1-trang-240mm-rgb-fixed', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1052824048', N'Kích thước radiator', N'240mm', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-tk1-trang-240mm-rgb-fixed', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1052824048', N'Thương hiệu', N'Leopard', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-tk1-trang-240mm-rgb-fixed', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1052824048', N'Kích thước', N'274 x 120 x 27 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-tk1-trang-240mm-rgb-fixed', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1052824048', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-leopard-tk1-trang-240mm-rgb-fixed', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051796772', N'Socket hỗ trợ', N'AM5;AM4;LGA1700;LGA1200;LGA1151;LGA1150;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-240-argb-display-trang', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1051796772', N'Kích thước radiator', N'240mm', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-240-argb-display-trang', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1051796772', N'Thương hiệu', N'Thermalright', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-240-argb-display-trang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051796772', N'Model', N'AIO', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-240-argb-display-trang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051796772', N'Kích thước', N'240 x 120 x 27 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-240-argb-display-trang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051796772', N'Bảo hành', N'24 tháng (2 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-240-argb-display-trang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051796773', N'Socket hỗ trợ', N'LGA1200;LGA2011;LGA2066;FM1;FM2;AM2;AM3;AM4;AM5;LGA1150;LGA1151;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-240-argb-display-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1051796773', N'Kích thước radiator', N'240mm', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-240-argb-display-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1051796773', N'Thương hiệu', N'Thermalright', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-240-argb-display-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051796773', N'Kích thước', N'274 x 120 x 27 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-240-argb-display-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051796773', N'Bảo hành', N'24 tháng (2 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-240-argb-display-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1055889029', N'Socket hỗ trợ', N'LGA1200;LGA2011;LGA2066;FM1;FM2;AM2;AM3;AM4;AM5;LGA1150;LGA1151;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-infinity-240-black-argb', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1055889029', N'Kích thước radiator', N'240mm', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-infinity-240-black-argb', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1055889029', N'Thương hiệu', N'Thermalright', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-infinity-240-black-argb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1055889029', N'Kích thước', N'274 x 120 x 27 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-infinity-240-black-argb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1055889029', N'Bảo hành', N'24 tháng (2 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-infinity-240-black-argb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1055889152', N'Socket hỗ trợ', N'LGA1200;LGA2011;LGA2066;FM1;FM2;AM2;AM3;AM4;AM5;LGA1150;LGA1151;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-infinity-360-black-argb', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1055889152', N'Kích thước radiator', N'360mm', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-infinity-360-black-argb', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1055889152', N'Thương hiệu', N'Thermalright', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-infinity-360-black-argb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1055889152', N'Kích thước', N'396 x 120 x 27 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-infinity-360-black-argb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1055889152', N'Bảo hành', N'24 tháng (2 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-infinity-360-black-argb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053600979', N'Socket hỗ trợ', N'LGA1200;LGA2011;LGA2066;FM1;FM2;AM2;AM3;AM4;AM5;LGA1150;LGA1151;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-aqua-elite-360-v3-den-argb', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1053600979', N'Kích thước radiator', N'360mm', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-aqua-elite-360-v3-den-argb', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1053600979', N'Thương hiệu', N'Thermalright', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-aqua-elite-360-v3-den-argb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053600979', N'Kích thước', N'396 x 120 x 27 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-aqua-elite-360-v3-den-argb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053600979', N'Bảo hành', N'24 tháng (2 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-aqua-elite-360-v3-den-argb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053600978', N'Socket hỗ trợ', N'LGA1200;LGA2011;LGA2066;FM1;FM2;AM2;AM3;AM4;AM5;LGA1150;LGA1151;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-aqua-elite-240-v3-den-argb', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1053600978', N'Kích thước radiator', N'240mm', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-aqua-elite-240-v3-den-argb', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1053600978', N'Thương hiệu', N'Thermalright', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-aqua-elite-240-v3-den-argb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053600978', N'Kích thước', N'274 x 120 x 27 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-aqua-elite-240-v3-den-argb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053600978', N'Bảo hành', N'24 tháng (2 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-aqua-elite-240-v3-den-argb', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051557124', N'Socket hỗ trợ', N'LGA1200;LGA2011;LGA2066;FM1;FM2;AM2;AM3;AM4;AM5;LGA1150;LGA1151;LGA1155;LGA1156', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-360-argb-display-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1051557124', N'Kích thước radiator', N'360mm', N'NORMALIZED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-360-argb-display-den', N'Chuẩn hóa từ tên/thông số trên trang nguồn.'),
+        (N'THNS-1051557124', N'Thương hiệu', N'Thermalright', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-360-argb-display-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051557124', N'Kích thước', N'396 x 120 x 27 mm', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-360-argb-display-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1051557124', N'Bảo hành', N'24 tháng (2 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tan-nhiet-nuoc-thermalright-frozen-warframe-360-argb-display-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076590001', N'Thương hiệu', N'OEM', N'SOURCED', N'https://tinhocngoisao.com/products/quat-tan-nhiet-pc-oem-a1225l-12s-120mm-khong-led-hieu-nang-cao-khung-luoi-bao-ve-4pin-pwm-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076590001', N'Model', N'A1225L 12S', N'SOURCED', N'https://tinhocngoisao.com/products/quat-tan-nhiet-pc-oem-a1225l-12s-120mm-khong-led-hieu-nang-cao-khung-luoi-bao-ve-4pin-pwm-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076590001', N'Bảo hành', N'12 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/quat-tan-nhiet-pc-oem-a1225l-12s-120mm-khong-led-hieu-nang-cao-khung-luoi-bao-ve-4pin-pwm-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053229105', N'Hãng', N'Leopard', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-f6-pro-argb-den-gio-thuan-4-mat-vo-cuc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053229105', N'Tốc độ', N'765-1800 RPM', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-f6-pro-argb-den-gio-thuan-4-mat-vo-cuc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053229105', N'Kết nối', N'Fan 4 PIN PWM / LED ARGB 5V 3 PIN', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-f6-pro-argb-den-gio-thuan-4-mat-vo-cuc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053229105', N'Tương thích', N'Tương thích hầu hết case hỗ trợ quạt 120 mm', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-f6-pro-argb-den-gio-thuan-4-mat-vo-cuc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053229105', N'Kích thước', N'120 x 120 x 25 mm', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-f6-pro-argb-den-gio-thuan-4-mat-vo-cuc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053229105', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-f6-pro-argb-den-gio-thuan-4-mat-vo-cuc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064629008', N'Hãng', N'Leopard', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-s1-auto-rgb-den-gio-nguoc-cam-nguon-truc-tiep', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064629008', N'Tốc độ', N'800–2000 RPM', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-s1-auto-rgb-den-gio-nguoc-cam-nguon-truc-tiep', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064629008', N'Kết nối', N'Cắm trực tiếp vào nguồn PC', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-s1-auto-rgb-den-gio-nguoc-cam-nguon-truc-tiep', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064629008', N'Tương thích', N'Tương thích hầu hết case hỗ trợ quạt 120 mm', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-s1-auto-rgb-den-gio-nguoc-cam-nguon-truc-tiep', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064629008', N'Kích thước', N'120 x 120 x 25 mm', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-s1-auto-rgb-den-gio-nguoc-cam-nguon-truc-tiep', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1064629008', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-s1-auto-rgb-den-gio-nguoc-cam-nguon-truc-tiep', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076265362', N'Thương hiệu', N'Jungle Leopard', N'SOURCED', N'https://tinhocngoisao.com/products/quat-tan-nhiet-pc-jungle-leopard-f8-v3-black-2000rpm-4pin-pwm-co-dieu-toc-khong-led-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076265362', N'Model', N'F8 V3', N'SOURCED', N'https://tinhocngoisao.com/products/quat-tan-nhiet-pc-jungle-leopard-f8-v3-black-2000rpm-4pin-pwm-co-dieu-toc-khong-led-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076265362', N'Tốc độ', N'2000RPM', N'SOURCED', N'https://tinhocngoisao.com/products/quat-tan-nhiet-pc-jungle-leopard-f8-v3-black-2000rpm-4pin-pwm-co-dieu-toc-khong-led-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076265362', N'Bảo hành', N'12 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/quat-tan-nhiet-pc-jungle-leopard-f8-v3-black-2000rpm-4pin-pwm-co-dieu-toc-khong-led-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053364074', N'Hãng', N'Leopard', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-f6-pro-argb-den-4-mat-vo-cuc-gio-nguoc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053364074', N'Tốc độ', N'765-1800 RPM ±10%', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-f6-pro-argb-den-4-mat-vo-cuc-gio-nguoc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053364074', N'Kết nối', N'Fan 4 PIN PWM / LED 5V 3 PIN ARGB', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-f6-pro-argb-den-4-mat-vo-cuc-gio-nguoc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053364074', N'Tương thích', N'Tương thích hầu hết case hỗ trợ quạt 120 mm', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-f6-pro-argb-den-4-mat-vo-cuc-gio-nguoc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053364074', N'Kích thước', N'120 x 120 x 25 mm', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-f6-pro-argb-den-4-mat-vo-cuc-gio-nguoc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053364074', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/fan-case-leopard-f6-pro-argb-den-4-mat-vo-cuc-gio-nguoc', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075851146', N'Thương hiệu', N'Dahua', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-van-phong-dahua-dhi-lm24-a221y-24-inch-full-hd-ips-144hz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075851146', N'Model', N'DHI-LM24-A221Y', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-van-phong-dahua-dhi-lm24-a221y-24-inch-full-hd-ips-144hz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075851146', N'Độ phân giải', N'1920 × 1080 (Full HD)', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-van-phong-dahua-dhi-lm24-a221y-24-inch-full-hd-ips-144hz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075851146', N'Tần số quét', N'120Hz (Overclock lên 144Hz)', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-van-phong-dahua-dhi-lm24-a221y-24-inch-full-hd-ips-144hz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075851146', N'Kích thước màn hình', N'23.8 inch', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-van-phong-dahua-dhi-lm24-a221y-24-inch-full-hd-ips-144hz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075851146', N'Bảo hành', N'36 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-van-phong-dahua-dhi-lm24-a221y-24-inch-full-hd-ips-144hz', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053519079', N'Thương hiệu', N'VSP', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-vsp-ip2736g-den-27-inch-full-hd-ips-360hz-1ms-phang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053519079', N'Tần số quét', N'360Hz', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-vsp-ip2736g-den-27-inch-full-hd-ips-360hz-1ms-phang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053519079', N'Tấm nền', N'IPS', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-vsp-ip2736g-den-27-inch-full-hd-ips-360hz-1ms-phang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053519079', N'Kích thước', N'27 inch', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-vsp-ip2736g-den-27-inch-full-hd-ips-360hz-1ms-phang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1053519079', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-vsp-ip2736g-den-27-inch-full-hd-ips-360hz-1ms-phang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075971913', N'Thương hiệu', N'MSI', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-msi-mpg-275cqrxf-27-inch-wqhd-rapid-va-240hz-usb-c-pd-98w-chan-cth', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075971913', N'Độ phân giải', N'2560 × 1440 (WQHD)', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-msi-mpg-275cqrxf-27-inch-wqhd-rapid-va-240hz-usb-c-pd-98w-chan-cth', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075971913', N'Tần số quét', N'240Hz', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-msi-mpg-275cqrxf-27-inch-wqhd-rapid-va-240hz-usb-c-pd-98w-chan-cth', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075971913', N'Kích thước màn hình', N'27 inch (68.58 cm)', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-msi-mpg-275cqrxf-27-inch-wqhd-rapid-va-240hz-usb-c-pd-98w-chan-cth', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075971913', N'Bảo hành', N'36 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-msi-mpg-275cqrxf-27-inch-wqhd-rapid-va-240hz-usb-c-pd-98w-chan-cth', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074968029', N'Thương hiệu', N'AiVision', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-vsp-aivision-ag2714qs1-27-inch-qhd-144hz-ips-1ms-lh-tu-van-truoc-khi-lap-arm-gia-treo', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074968029', N'Mã sản phẩm', N'AG2714QS1', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-vsp-aivision-ag2714qs1-27-inch-qhd-144hz-ips-1ms-lh-tu-van-truoc-khi-lap-arm-gia-treo', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074968029', N'Độ phân giải', N'2K QHD (2560 x 1440 px)', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-vsp-aivision-ag2714qs1-27-inch-qhd-144hz-ips-1ms-lh-tu-van-truoc-khi-lap-arm-gia-treo', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074968029', N'Tần số quét', N'144Hz', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-vsp-aivision-ag2714qs1-27-inch-qhd-144hz-ips-1ms-lh-tu-van-truoc-khi-lap-arm-gia-treo', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074968029', N'Kích thước màn hình', N'27 inch', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-vsp-aivision-ag2714qs1-27-inch-qhd-144hz-ips-1ms-lh-tu-van-truoc-khi-lap-arm-gia-treo', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074968029', N'Bảo hành', N'24 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-vsp-aivision-ag2714qs1-27-inch-qhd-144hz-ips-1ms-lh-tu-van-truoc-khi-lap-arm-gia-treo', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074328123', N'Thương hiệu', N'Dahua', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-van-phong-dahua-dhi-lm22-a211y-21-45-inch-fhd-120hz-ips-hdmi-vga', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074328123', N'Tần số quét', N'100 Hz (ép xung lên 120 Hz)', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-van-phong-dahua-dhi-lm22-a211y-21-45-inch-fhd-120hz-ips-hdmi-vga', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074328123', N'Tấm nền', N'IPS', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-van-phong-dahua-dhi-lm22-a211y-21-45-inch-fhd-120hz-ips-hdmi-vga', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074328123', N'Kích thước', N'21.45 inch; 491.4 x 290.8 x 45.2 mm', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-van-phong-dahua-dhi-lm22-a211y-21-45-inch-fhd-120hz-ips-hdmi-vga', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074328123', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-van-phong-dahua-dhi-lm22-a211y-21-45-inch-fhd-120hz-ips-hdmi-vga', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074968028', N'Thương hiệu', N'AiVision', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-vsp-aivision-ag2414qs1-24-inch-qhd-144hz-ips-1ms', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074968028', N'Mã sản phẩm', N'AG2414QS1', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-vsp-aivision-ag2414qs1-24-inch-qhd-144hz-ips-1ms', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074968028', N'Độ phân giải', N'2K QHD (2560 x 1440 px)', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-vsp-aivision-ag2414qs1-24-inch-qhd-144hz-ips-1ms', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074968028', N'Tần số quét', N'144Hz', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-vsp-aivision-ag2414qs1-24-inch-qhd-144hz-ips-1ms', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074968028', N'Tấm nền', N'ADS / IPS', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-vsp-aivision-ag2414qs1-24-inch-qhd-144hz-ips-1ms', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074968028', N'Kích thước màn hình', N'24 inch', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-vsp-aivision-ag2414qs1-24-inch-qhd-144hz-ips-1ms', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074968028', N'Bảo hành', N'24 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/man-hinh-gaming-2k-vsp-aivision-ag2414qs1-24-inch-qhd-144hz-ips-1ms', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952455', N'Thương hiệu', N'Logitech', N'SOURCED', N'https://tinhocngoisao.com/products/ban-phim-van-phong-logitech-k120-chinh-hang-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952455', N'Kết nối', N'Có dây', N'SOURCED', N'https://tinhocngoisao.com/products/ban-phim-van-phong-logitech-k120-chinh-hang-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952455', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/ban-phim-van-phong-logitech-k120-chinh-hang-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952460', N'Thương hiệu', N'Logitech', N'SOURCED', N'https://tinhocngoisao.com/products/combo-phim-chuot-logitech-mk120-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952460', N'Kết nối', N'Có dây', N'SOURCED', N'https://tinhocngoisao.com/products/combo-phim-chuot-logitech-mk120-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952460', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/combo-phim-chuot-logitech-mk120-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066113068', N'Thương hiệu', N'Motospeed', N'SOURCED', N'https://tinhocngoisao.com/products/ban-phim-motospeed-k103-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066113068', N'Kết nối', N'Có dây', N'SOURCED', N'https://tinhocngoisao.com/products/ban-phim-motospeed-k103-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066113068', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/ban-phim-motospeed-k103-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076784516', N'Thương hiệu', N'Rapoo', N'SOURCED', N'https://tinhocngoisao.com/products/ban-phim-co-gaming-khong-day-rapoo-v500-pro-87-multi-mode-wireless-3-mode-red-switch-led-6-mau', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076784516', N'Mã sản phẩm', N'KERP0020', N'SOURCED', N'https://tinhocngoisao.com/products/ban-phim-co-gaming-khong-day-rapoo-v500-pro-87-multi-mode-wireless-3-mode-red-switch-led-6-mau', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076784516', N'Loại switch', N'Red Switch', N'SOURCED', N'https://tinhocngoisao.com/products/ban-phim-co-gaming-khong-day-rapoo-v500-pro-87-multi-mode-wireless-3-mode-red-switch-led-6-mau', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1076784516', N'Bảo hành', N'24 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/ban-phim-co-gaming-khong-day-rapoo-v500-pro-87-multi-mode-wireless-3-mode-red-switch-led-6-mau', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075470741', N'Thương hiệu', N'Shipadoo', N'SOURCED', N'https://tinhocngoisao.com/products/combo-ban-phim-chuot-gia-co-gaming-shipadoo-d500-co-day-usb-led-rainbow-1000-dpi-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075470741', N'Kết nối', N'USB Wired', N'SOURCED', N'https://tinhocngoisao.com/products/combo-ban-phim-chuot-gia-co-gaming-shipadoo-d500-co-day-usb-led-rainbow-1000-dpi-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075470741', N'DPI', N'1000 DPI', N'SOURCED', N'https://tinhocngoisao.com/products/combo-ban-phim-chuot-gia-co-gaming-shipadoo-d500-co-day-usb-led-rainbow-1000-dpi-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075470741', N'Kích thước', N'130 × 75 × 40 mm; 435 × 128 × 32 mm', N'SOURCED', N'https://tinhocngoisao.com/products/combo-ban-phim-chuot-gia-co-gaming-shipadoo-d500-co-day-usb-led-rainbow-1000-dpi-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1075470741', N'Bảo hành', N'12 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/combo-ban-phim-chuot-gia-co-gaming-shipadoo-d500-co-day-usb-led-rainbow-1000-dpi-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952426', N'Thương hiệu', N'Dareu', N'SOURCED', N'https://tinhocngoisao.com/products/ban-phim-dare-u-lk185-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952426', N'Kết nối', N'Có dây', N'SOURCED', N'https://tinhocngoisao.com/products/ban-phim-dare-u-lk185-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952426', N'Kích thước', N'440 × 140 × 30 mm', N'SOURCED', N'https://tinhocngoisao.com/products/ban-phim-dare-u-lk185-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952426', N'Bảo hành', N'24 tháng (2 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/ban-phim-dare-u-lk185-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952249', N'Thương hiệu', N'Logitech', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-van-phong-logitech-b100-chinh-hang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952249', N'Kết nối', N'Có dây', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-van-phong-logitech-b100-chinh-hang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952249', N'DPI', N'800 DPI', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-van-phong-logitech-b100-chinh-hang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952249', N'Kích thước', N'113 x 62 x 38 mm', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-van-phong-logitech-b100-chinh-hang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952249', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-van-phong-logitech-b100-chinh-hang', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952123', N'Thương hiệu', N'Logitech', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-logitech-g102-gen-ii-lightsync-rgb-gaming-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952123', N'DPI', N'8000 DPI', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-logitech-g102-gen-ii-lightsync-rgb-gaming-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952123', N'Kích thước', N'116.6 x 62.15 x 38.2 mm', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-logitech-g102-gen-ii-lightsync-rgb-gaming-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952123', N'Bảo hành', N'24 tháng (2 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-logitech-g102-gen-ii-lightsync-rgb-gaming-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066113123', N'Thương hiệu', N'Motospeed', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-motospeed-f333-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066113123', N'Kiểu kết nối', N'Có dây', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-motospeed-f333-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066113123', N'DPI', N'1000 DPI', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-motospeed-f333-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066113123', N'Kích thước', N'105 x 58 x 36 mm', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-motospeed-f333-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066113123', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-motospeed-f333-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952252', N'Thương hiệu', N'DareU', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-khong-day-dare-u-lm106g-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952252', N'Kiểu kết nối', N'Wireless', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-khong-day-dare-u-lm106g-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952252', N'DPI', N'1200 DPI', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-khong-day-dare-u-lm106g-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952252', N'Kích thước', N'112 x 60 x 36 mm', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-khong-day-dare-u-lm106g-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952252', N'Bảo hành', N'24 tháng (2 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-khong-day-dare-u-lm106g-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952248', N'Thương hiệu', N'Logitech', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-logitech-b175-optical-wireless-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952248', N'Kiểu kết nối', N'Wireless', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-logitech-b175-optical-wireless-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952248', N'DPI', N'1000 DPI', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-logitech-b175-optical-wireless-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952248', N'Kích thước', N'99 x 60 x 39 mm', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-logitech-b175-optical-wireless-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952248', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-logitech-b175-optical-wireless-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1077277567', N'Thương hiệu', N'DareU', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-gaming-khong-day-dare-u-em910g-triple-mode-12000-dpi-mau-den-59g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1077277567', N'Model', N'EM910G', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-gaming-khong-day-dare-u-em910g-triple-mode-12000-dpi-mau-den-59g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1077277567', N'Kết nối', N'Wireless 2.4GHz / Bluetooth / Có dây', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-gaming-khong-day-dare-u-em910g-triple-mode-12000-dpi-mau-den-59g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1077277567', N'DPI', N'400 / 800 / 1600 (mặc định) / 3200 / 6400 / 12000 DPI', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-gaming-khong-day-dare-u-em910g-triple-mode-12000-dpi-mau-den-59g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1077277567', N'Kích thước', N'127 × 64 × 40 mm', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-gaming-khong-day-dare-u-em910g-triple-mode-12000-dpi-mau-den-59g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1077277567', N'Bảo hành', N'24 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/chuot-gaming-khong-day-dare-u-em910g-triple-mode-12000-dpi-mau-den-59g', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1067224282', N'Thông tin sản phẩm', N'Loa máy tính USB 2.0 Kisonli V410 - Black', N'SOURCED', N'https://tinhocngoisao.com/products/loa-may-tinh-usb-2-0-kisonli-v410-black', N'Thông tin tên sản phẩm tại cửa hàng; chưa có bảng thông số chi tiết.'),
+        (N'THNS-1064323830', N'Thông tin sản phẩm', N'Loa kiểm âm Edifier MR3 - Trắng', N'SOURCED', N'https://tinhocngoisao.com/products/loa-kiem-am-edifier-mr3-trang', N'Thông tin tên sản phẩm tại cửa hàng; chưa có bảng thông số chi tiết.'),
+        (N'THNS-1067224139', N'Thông tin sản phẩm', N'Loa máy tính USB 2.0 Kisonli L-1040 - Pink', N'SOURCED', N'https://tinhocngoisao.com/products/loa-may-tinh-usb-2-0-kisonli-l-1040-pink', N'Thông tin tên sản phẩm tại cửa hàng; chưa có bảng thông số chi tiết.'),
+        (N'THNS-1051735788', N'Thông tin sản phẩm', N'Loa Bluetooth Edifier R1080BT - Black', N'SOURCED', N'https://tinhocngoisao.com/products/loa-bluetooth-edifier-r1080bt-black', N'Thông tin tên sản phẩm tại cửa hàng; chưa có bảng thông số chi tiết.'),
+        (N'THNS-1069308506', N'Thông tin sản phẩm', N'Loa Soundbar Thonet & Vander Dunn Gen 2 | Bluetooth 5.3, màu đen', N'SOURCED', N'https://tinhocngoisao.com/products/loa-soundbar-thonet-vander-dunn-gen-2-bluetooth-5-3-mau-den', N'Thông tin tên sản phẩm tại cửa hàng; chưa có bảng thông số chi tiết.'),
+        (N'THNS-1050253531', N'Hãng', N'Xiberia', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-xiberia-q4-virtual-7-1', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1050253531', N'Kết nối', N'Có dây', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-xiberia-q4-virtual-7-1', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1050253531', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-xiberia-q4-virtual-7-1', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1057141230', N'Hãng', N'Dare-U', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-dare-u-eh925l-rgb-7-1-black-red', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1057141230', N'Model', N'Eh925L 7.1', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-dare-u-eh925l-rgb-7-1-black-red', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1057141230', N'Kết nối', N'Có dây', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-dare-u-eh925l-rgb-7-1-black-red', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1057141230', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-dare-u-eh925l-rgb-7-1-black-red', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1062105160', N'Hãng', N'DareU', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-dareu-eh722x-pro-multi-led', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1062105160', N'Model', N'EH722X Pro', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-dareu-eh722x-pro-multi-led', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1062105160', N'Kết nối', N'Có dây', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-dareu-eh722x-pro-multi-led', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1062105160', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-dareu-eh722x-pro-multi-led', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952543', N'Hãng', N'Xiberia', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-xiberia-v15-7-1-surround-gaming-led-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952543', N'Model', N'V15 7.1', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-xiberia-v15-7-1-surround-gaming-led-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952543', N'Kết nối', N'Có dây', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-xiberia-v15-7-1-surround-gaming-led-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952543', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-xiberia-v15-7-1-surround-gaming-led-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952505', N'Hãng', N'Dare-U', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-gaming-dare-u-eh416-7-1-rgb-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952505', N'Model', N'EH416 7.1', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-gaming-dare-u-eh416-7-1-rgb-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952505', N'Kết nối', N'Có dây', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-gaming-dare-u-eh416-7-1-rgb-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036952505', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/tai-nghe-gaming-dare-u-eh416-7-1-rgb-black', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036953244', N'Thương hiệu', N'OEM', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-ai-hd-2k-full-hd-1080p', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036953244', N'Độ phân giải', N'Full HD 1080p / 2K', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-ai-hd-2k-full-hd-1080p', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036953244', N'Kích thước', N'120 × 27.9 × 25.6 mm', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-ai-hd-2k-full-hd-1080p', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036953244', N'Bảo hành', N'6 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-ai-hd-2k-full-hd-1080p', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036953247', N'Thương hiệu', N'VSP', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-vsp-w66-w-r-full-hd-1080p', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036953247', N'Độ phân giải', N'Full HD 1080p', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-vsp-w66-w-r-full-hd-1080p', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036953247', N'Kích thước', N'65 x 65.5 x 86.5 mm', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-vsp-w66-w-r-full-hd-1080p', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036953247', N'Bảo hành', N'6 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-vsp-w66-w-r-full-hd-1080p', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036953246', N'Thương hiệu', N'VSP', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-vsp-w66-w-full-hd-1080p', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036953246', N'Độ phân giải', N'Full HD 1080p / 2K / 4K', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-vsp-w66-w-full-hd-1080p', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036953246', N'Kích thước', N'65 x 65.5 x 86.5 mm', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-vsp-w66-w-full-hd-1080p', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036953246', N'Bảo hành', N'6 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-vsp-w66-w-full-hd-1080p', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1038111669', N'Thương hiệu', N'Logitech', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-logitech-c270-hd-720p', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1038111669', N'Độ phân giải', N'HD 720p', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-logitech-c270-hd-720p', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1038111669', N'Kích thước', N'72.91 x 31.91 x 66.64 mm (bao gồm kẹp)', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-logitech-c270-hd-720p', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1038111669', N'Bảo hành', N'24 tháng (2 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-logitech-c270-hd-720p', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1055824628', N'Thương hiệu', N'Logitech', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-logitech-brio-100-black-960-001587', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1055824628', N'Độ phân giải', N'Full HD 1080p', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-logitech-brio-100-black-960-001587', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1055824628', N'Kích thước', N'31.91 x 72.91 x 66.64 mm', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-logitech-brio-100-black-960-001587', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066195776', N'Thương hiệu', N'Logitech', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-logitech-brio-100-white-960-001618', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066195776', N'Độ phân giải', N'Full HD 1080p', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-logitech-brio-100-white-960-001618', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066195776', N'Kích thước', N'31.91 x 72.91 x 66.64 mm', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-logitech-brio-100-white-960-001618', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1066195776', N'Bảo hành', N'36 tháng (3 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/webcam-logitech-brio-100-white-960-001618', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1069217656', N'Hãng', N'VSP', N'SOURCED', N'https://tinhocngoisao.com/products/gia-treo-man-hinh-vsp-vg60-1-den-xam-17-42-inch-chan-de-rgb-nut-chinh-led-cong-usb-3-0-type-c', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1069217656', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/gia-treo-man-hinh-vsp-vg60-1-den-xam-17-42-inch-chan-de-rgb-nut-chinh-led-cong-usb-3-0-type-c', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074371201', N'Thương hiệu', N'North Bayou', N'SOURCED', N'https://tinhocngoisao.com/products/gia-treo-man-hinh-north-bayou-a5-gaming-version-2026-chan-don-17-32-inch-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074371201', N'Bảo hành', N'12 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/gia-treo-man-hinh-north-bayou-a5-gaming-version-2026-chan-don-17-32-inch-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1071863318', N'Thương hiệu', N'North Bayou', N'SOURCED', N'https://tinhocngoisao.com/products/gia-treo-lcd-northbayou-f80-17-32-inch-new-version-2026-ma-u-xam', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1071863318', N'Bảo hành', N'12 tháng (1 năm)', N'SOURCED', N'https://tinhocngoisao.com/products/gia-treo-lcd-northbayou-f80-17-32-inch-new-version-2026-ma-u-xam', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1072760455', N'Thông tin sản phẩm', N'Giá Treo LCD Northbayou F80-XE 17"-32" | New Version 2026, Màu Trắng (EG)', N'SOURCED', N'https://tinhocngoisao.com/products/gia-treo-lcd-northbayou-f80-xe-17-32-new-version-2026-ma-u-tra-ng-eg', N'Thông tin tên sản phẩm tại cửa hàng; chưa có bảng thông số chi tiết.'),
+        (N'THNS-1074371202', N'Thương hiệu', N'North Bayou', N'SOURCED', N'https://tinhocngoisao.com/products/gia-treo-man-hinh-north-bayou-a5-xs-gaming-version-2026-chan-don-17-32-inch-bac', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074371202', N'Bảo hành', N'12 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/gia-treo-man-hinh-north-bayou-a5-xs-gaming-version-2026-chan-don-17-32-inch-bac', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074371203', N'Thương hiệu', N'NB Ergonomic (North Bayou)', N'SOURCED', N'https://tinhocngoisao.com/products/gia-treo-man-hinh-north-bayou-a5-c-gaming-version-2026-chan-doi-17-32-inch-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1074371203', N'Bảo hành', N'12 tháng', N'SOURCED', N'https://tinhocngoisao.com/products/gia-treo-man-hinh-north-bayou-a5-c-gaming-version-2026-chan-doi-17-32-inch-den', N'Trường thông số do cửa hàng công bố.'),
+        (N'THNS-1036950186', N'Công suất', N'650', N'MANUFACTURER', N'https://vn.msi.com/Power-Supply/MAG-A650BN/Specification', N'6+2-pin được tính là 8-pin, không đếm trùng thành đầu 6-pin độc lập.'),
+        (N'THNS-1036950186', N'Form factor', N'ATX', N'MANUFACTURER', N'https://vn.msi.com/Power-Supply/MAG-A650BN/Specification', N'6+2-pin được tính là 8-pin, không đếm trùng thành đầu 6-pin độc lập.'),
+        (N'THNS-1036950186', N'Chiều dài', N'140', N'MANUFACTURER', N'https://vn.msi.com/Power-Supply/MAG-A650BN/Specification', N'6+2-pin được tính là 8-pin, không đếm trùng thành đầu 6-pin độc lập.'),
+        (N'THNS-1036950186', N'Số đầu PCIe 6-pin', N'0', N'MANUFACTURER', N'https://vn.msi.com/Power-Supply/MAG-A650BN/Specification', N'6+2-pin được tính là 8-pin, không đếm trùng thành đầu 6-pin độc lập.'),
+        (N'THNS-1036950186', N'Số đầu PCIe 8-pin', N'2', N'MANUFACTURER', N'https://vn.msi.com/Power-Supply/MAG-A650BN/Specification', N'6+2-pin được tính là 8-pin, không đếm trùng thành đầu 6-pin độc lập.'),
+        (N'THNS-1036950186', N'Số đầu EPS 8-pin', N'1', N'MANUFACTURER', N'https://vn.msi.com/Power-Supply/MAG-A650BN/Specification', N'6+2-pin được tính là 8-pin, không đếm trùng thành đầu 6-pin độc lập.'),
+        (N'THNS-1036950186', N'Số đầu 12V-2x6 / 12VHPWR', N'0', N'MANUFACTURER', N'https://vn.msi.com/Power-Supply/MAG-A650BN/Specification', N'6+2-pin được tính là 8-pin, không đếm trùng thành đầu 6-pin độc lập.'),
+        (N'NCPC-24829', N'Socket hỗ trợ', N'LGA1700;LGA1200;LGA1151;LGA1150;LGA1155', N'NORMALIZED', N'https://nguyencongpc.vn/tan-nhiet-khi-cpu-deepcool-ak400', N'Chuẩn hóa từ thông số trang nguồn.'),
+        (N'NCPC-24829', N'Chiều cao', N'155', N'NORMALIZED', N'https://nguyencongpc.vn/tan-nhiet-khi-cpu-deepcool-ak400', N'Kích thước tổng 127×97×155mm; trang bán gọi nhầm là kích thước quạt.'),
+        (N'NCPC-24829', N'Model', N'Deepcool AK400', N'SOURCED', N'https://nguyencongpc.vn/tan-nhiet-khi-cpu-deepcool-ak400', N'Chuẩn hóa từ thông số trang nguồn.'),
+        (N'NCPC-24829', N'Tốc độ quạt', N'500~1850 RPM±10%', N'SOURCED', N'https://nguyencongpc.vn/tan-nhiet-khi-cpu-deepcool-ak400', N'Chuẩn hóa từ thông số trang nguồn.'),
+        (N'NCPC-24829', N'Đầu cấp nguồn quạt', N'4-pin PWM', N'SOURCED', N'https://nguyencongpc.vn/tan-nhiet-khi-cpu-deepcool-ak400', N'Chuẩn hóa từ thông số trang nguồn.'),
+        (N'NCPC-24829', N'Khối lượng tịnh', N'661 g', N'SOURCED', N'https://nguyencongpc.vn/tan-nhiet-khi-cpu-deepcool-ak400', N'Chuẩn hóa từ thông số trang nguồn.'),
+        (N'NCPC-23609', N'Giao tiếp', N'NVMe', N'NORMALIZED', N'https://nguyencongpc.vn/o-cung-ssd-kingston-nv2-1tb-pcie-40-x4-nvme-m2-snv2s1000g', N'Chuẩn hóa từ thông số trang nguồn.'),
+        (N'NCPC-23609', N'Form factor', N'M.2', N'NORMALIZED', N'https://nguyencongpc.vn/o-cung-ssd-kingston-nv2-1tb-pcie-40-x4-nvme-m2-snv2s1000g', N'Chuẩn hóa từ thông số trang nguồn.'),
+        (N'NCPC-23609', N'Kích thước M.2', N'2280', N'NORMALIZED', N'https://nguyencongpc.vn/o-cung-ssd-kingston-nv2-1tb-pcie-40-x4-nvme-m2-snv2s1000g', N'Chuẩn hóa từ thông số trang nguồn.'),
+        (N'NCPC-23609', N'Dung lượng', N'1TB', N'NORMALIZED', N'https://nguyencongpc.vn/o-cung-ssd-kingston-nv2-1tb-pcie-40-x4-nvme-m2-snv2s1000g', N'Chuẩn hóa từ thông số trang nguồn.'),
+        (N'NCPC-23609', N'Model', N'SNV2S/1000G', N'NORMALIZED', N'https://nguyencongpc.vn/o-cung-ssd-kingston-nv2-1tb-pcie-40-x4-nvme-m2-snv2s1000g', N'Chuẩn hóa từ thông số trang nguồn.'),
+        (N'NCPC-23037', N'Mô hình đón âm', N'Supercardioid để giảm ồn xung quanh', N'SOURCED', N'https://nguyencongpc.vn/micro-razer-seiren-x-quartz-pink-edition', N'Chuẩn hóa từ thông số trang nguồn.'),
+        (N'NCPC-23037', N'Tốc độ sample rate', N'Tối thiểu 44,1kHz / tối đa 48kHz', N'SOURCED', N'https://nguyencongpc.vn/micro-razer-seiren-x-quartz-pink-edition', N'Chuẩn hóa từ thông số trang nguồn.'),
+        (N'NCPC-23037', N'Bit rate', N'16 bit', N'SOURCED', N'https://nguyencongpc.vn/micro-razer-seiren-x-quartz-pink-edition', N'Chuẩn hóa từ thông số trang nguồn.'),
+        (N'NCPC-23037', N'Tần số phản hồi', N'Microphone : 20 – 20000 Hz Headphone amplifier : 20 – 20000 Hz', N'SOURCED', N'https://nguyencongpc.vn/micro-razer-seiren-x-quartz-pink-edition', N'Chuẩn hóa từ thông số trang nguồn.'),
+        (N'NCPC-23037', N'Độ nhạy', N'17,8mV / Pa ( 1kHz )', N'SOURCED', N'https://nguyencongpc.vn/micro-razer-seiren-x-quartz-pink-edition', N'Chuẩn hóa từ thông số trang nguồn.'),
+        (N'NCPC-23037', N'Tương thích nền tảng', N'PC/MAC', N'SOURCED', N'https://nguyencongpc.vn/micro-razer-seiren-x-quartz-pink-edition', N'Chuẩn hóa từ thông số trang nguồn.'),
+        (N'NCPC-24065', N'CPU', N'Intel Core i5-12400F', N'SOURCED', N'https://nguyencongpc.vn/pc-dohoa-ncpc-31', N'Cấu hình trên trang PC nguyên bộ. Không tạo BOM bằng các linh kiện khác model.'),
+        (N'NCPC-24065', N'RAM', N'16GB DDR4', N'SOURCED', N'https://nguyencongpc.vn/pc-dohoa-ncpc-31', N'Cấu hình trên trang PC nguyên bộ. Không tạo BOM bằng các linh kiện khác model.'),
+        (N'NCPC-24065', N'VGA', N'SPARKLE Intel Arc A380 ELF 6GB', N'SOURCED', N'https://nguyencongpc.vn/pc-dohoa-ncpc-31', N'Cấu hình trên trang PC nguyên bộ. Không tạo BOM bằng các linh kiện khác model.'),
+        (N'NCPC-24065', N'SSD', N'Dahua C910N 256GB NVMe', N'SOURCED', N'https://nguyencongpc.vn/pc-dohoa-ncpc-31', N'Cấu hình trên trang PC nguyên bộ. Không tạo BOM bằng các linh kiện khác model.'),
+        (N'NCPC-24065', N'Mainboard', N'MSI PRO H610M-E DDR4', N'SOURCED', N'https://nguyencongpc.vn/pc-dohoa-ncpc-31', N'Cấu hình trên trang PC nguyên bộ. Không tạo BOM bằng các linh kiện khác model.'),
+        (N'NCPC-24065', N'Nguồn', N'Segotep SG D600A U5 500W', N'SOURCED', N'https://nguyencongpc.vn/pc-dohoa-ncpc-31', N'Cấu hình trên trang PC nguyên bộ. Không tạo BOM bằng các linh kiện khác model.');
+
+    CREATE TABLE #inserted_specs (product_id BIGINT NOT NULL, attribute_id INT NOT NULL);
+
+    -- Tôn trọng dữ liệu đang có. Dừng nếu ID/SKU đã được dùng cho bản ghi khác.
+    IF EXISTS (
+        SELECT 1 FROM #category_seed s JOIN dbo.categories c ON c.id = s.id
+        WHERE c.[name] <> s.[name] OR ISNULL(c.parent_id, 0) <> ISNULL(s.parent_id, 0)
+    ) THROW 50001, N'ID danh mục đã được dùng khác bộ seed. Dùng database trống để nhập dữ liệu mẫu.', 1;
+
+    IF EXISTS (
+        SELECT 1 FROM #product_seed s JOIN dbo.products p ON p.id = s.id OR p.sku = s.sku
+        WHERE p.id <> s.id OR p.sku <> s.sku
+    ) THROW 50002, N'ID hoặc SKU sản phẩm đã được dùng khác bộ seed. Dùng database trống để nhập dữ liệu mẫu.', 1;
+
+    SET IDENTITY_INSERT dbo.categories ON;
+
+    INSERT INTO dbo.categories(id, [name], parent_id)
+    SELECT s.id, s.[name], s.parent_id FROM #category_seed s
+    WHERE s.parent_id IS NULL AND NOT EXISTS (SELECT 1 FROM dbo.categories c WHERE c.id = s.id);
+
+    INSERT INTO dbo.categories(id, [name], parent_id)
+    SELECT s.id, s.[name], s.parent_id FROM #category_seed s
+    WHERE s.parent_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dbo.categories c WHERE c.id = s.id);
+
+    SET IDENTITY_INSERT dbo.categories OFF;
+    SET IDENTITY_INSERT dbo.products ON;
+
+    INSERT INTO dbo.products(id, sku, [name], price, stock_quantity, thumbnail, product_type, category_id)
+    SELECT s.id, s.sku, s.[name], s.price, s.stock_quantity, s.thumbnail, s.product_type, s.category_id
+    FROM #product_seed s
+    WHERE NOT EXISTS (SELECT 1 FROM dbo.products p WHERE p.id = s.id);
+
+    SET IDENTITY_INSERT dbo.products OFF;
+
+    INSERT INTO dbo.catalog_sources(product_id, source_url, image_url, captured_on, price_status, stock_status, note)
+    SELECT s.product_id, s.source_url, s.image_url, s.captured_on, s.price_status, s.stock_status, s.note
+    FROM #source_seed s
+    WHERE NOT EXISTS (SELECT 1 FROM dbo.catalog_sources c WHERE c.product_id = s.product_id);
+
+    INSERT INTO dbo.catalog_related_sources(product_id, source_url)
+    SELECT s.product_id, s.source_url FROM #related_source_seed s
+    WHERE NOT EXISTS (SELECT 1 FROM dbo.catalog_related_sources c WHERE c.product_id = s.product_id AND c.source_url = s.source_url);
+
+    INSERT INTO dbo.attributes([name])
+    SELECT DISTINCT s.attribute_name FROM #spec_seed s
+    WHERE NOT EXISTS (SELECT 1 FROM dbo.attributes a WHERE a.[name] = s.attribute_name);
+
+    -- Ghi tên nguồn cho các thông số vừa nhập. Giữ lại thông số do nhóm tự cập nhật.
+    INSERT INTO dbo.product_attributes(product_id, attribute_id, [value])
+    OUTPUT inserted.product_id, inserted.attribute_id INTO #inserted_specs
+    SELECT p.id, a.id, s.attribute_value
+    FROM #spec_seed s
+    JOIN dbo.products p ON p.sku = s.sku
+    JOIN dbo.attributes a ON a.[name] = s.attribute_name
+    WHERE NOT EXISTS (
+        SELECT 1 FROM dbo.product_attributes x WHERE x.product_id = p.id AND x.attribute_id = a.id
     );
-END;
-GO
 
-IF OBJECT_ID(N'dbo.product_attributes', N'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.product_attributes (
-        product_id BIGINT NOT NULL,
-        attribute_id INT NOT NULL,
-        [value] NVARCHAR(255) NOT NULL,
-        CONSTRAINT PK_product_attributes PRIMARY KEY (product_id, attribute_id),
-        CONSTRAINT FK_product_attributes_products FOREIGN KEY (product_id)
-            REFERENCES dbo.products(id) ON DELETE CASCADE,
-        CONSTRAINT FK_product_attributes_attributes FOREIGN KEY (attribute_id)
-            REFERENCES dbo.attributes(id) ON DELETE CASCADE
-    );
-END;
-GO
+    INSERT INTO dbo.catalog_attribute_sources(product_id, attribute_id, source_status, source_url, source_note, captured_on)
+    SELECT i.product_id, i.attribute_id, s.source_status, s.source_url, s.source_note, CONVERT(DATE, N'20261026', 112)
+    FROM #inserted_specs i
+    JOIN dbo.products p ON p.id = i.product_id
+    JOIN dbo.attributes a ON a.id = i.attribute_id
+    JOIN #spec_seed s ON s.sku = p.sku AND s.attribute_name = a.[name];
 
-IF OBJECT_ID(N'dbo.prebuilt_components', N'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.prebuilt_components (
-        pc_id BIGINT NOT NULL,
-        component_id BIGINT NOT NULL,
-        quantity INT NOT NULL CONSTRAINT DF_prebuilt_components_quantity DEFAULT (1),
-        CONSTRAINT PK_prebuilt_components PRIMARY KEY (pc_id, component_id),
-        CONSTRAINT CK_prebuilt_components_quantity CHECK (quantity > 0),
-        CONSTRAINT CK_prebuilt_components_not_self CHECK (pc_id <> component_id),
-        CONSTRAINT FK_prebuilt_components_pc FOREIGN KEY (pc_id)
-            REFERENCES dbo.products(id) ON DELETE CASCADE,
-        CONSTRAINT FK_prebuilt_components_component FOREIGN KEY (component_id)
-            REFERENCES dbo.products(id) ON DELETE NO ACTION
-    );
-END;
-GO
+    INSERT INTO dbo.demo_seed_runs(run_key, [description])
+    VALUES (N'PCSTORE_CATALOG_V1', N'Nhập danh mục, sản phẩm và thông số từ dự án .');
 
--- ============================================================
--- 4. DON HANG VA CHI TIET DON HANG
--- ============================================================
+    DROP TABLE #inserted_specs, #spec_seed, #related_source_seed, #source_seed, #product_seed, #category_seed;
 
-IF OBJECT_ID(N'dbo.orders', N'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.orders (
-        id BIGINT IDENTITY(1,1) NOT NULL,
-        user_id BIGINT NULL,                 -- Khach vang lai duoc de NULL
-        receiver_name NVARCHAR(100) NOT NULL,
-        receiver_phone NVARCHAR(20) NOT NULL,
-        receiver_email NVARCHAR(100) NULL,
-        province NVARCHAR(100) NOT NULL,
-        district NVARCHAR(100) NOT NULL,
-        address_detail NVARCHAR(255) NOT NULL,
-        order_note NVARCHAR(MAX) NULL,
-        order_date DATETIME2(0) NOT NULL
-            CONSTRAINT DF_orders_order_date DEFAULT (SYSDATETIME()),
-        total_amount DECIMAL(15, 2) NOT NULL,
-        payment_method NVARCHAR(50) NOT NULL,
-        [status] NVARCHAR(20) NOT NULL
-            CONSTRAINT DF_orders_status DEFAULT (N'PENDING'),
-        CONSTRAINT PK_orders PRIMARY KEY (id),
-        CONSTRAINT CK_orders_total CHECK (total_amount >= 0),
-        CONSTRAINT CK_orders_status CHECK ([status] IN
-            (N'PENDING', N'CONFIRMED', N'SHIPPING', N'COMPLETED', N'CANCELLED')),
-        CONSTRAINT FK_orders_users FOREIGN KEY (user_id)
-            REFERENCES dbo.users(id) ON DELETE SET NULL
-    );
-END;
+    COMMIT TRANSACTION;
+    SELECT N'Đã nhập danh mục, sản phẩm và thông số PCStore.' AS ket_qua;
+END TRY
+BEGIN CATCH
+    IF XACT_STATE() <> 0 ROLLBACK TRANSACTION;
+    SET IDENTITY_INSERT dbo.categories OFF;
+    SET IDENTITY_INSERT dbo.products OFF;
+    THROW;
+END CATCH;
 GO
-
-IF OBJECT_ID(N'dbo.order_details', N'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.order_details (
-        id BIGINT IDENTITY(1,1) NOT NULL,
-        order_id BIGINT NOT NULL,
-        product_id BIGINT NOT NULL,
-        quantity INT NOT NULL,
-        unit_price DECIMAL(15, 2) NOT NULL,
-        CONSTRAINT PK_order_details PRIMARY KEY (id),
-        CONSTRAINT CK_order_details_quantity CHECK (quantity > 0),
-        CONSTRAINT CK_order_details_price CHECK (unit_price >= 0),
-        CONSTRAINT FK_order_details_orders FOREIGN KEY (order_id)
-            REFERENCES dbo.orders(id) ON DELETE CASCADE,
-        CONSTRAINT FK_order_details_products FOREIGN KEY (product_id)
-            REFERENCES dbo.products(id) ON DELETE NO ACTION
-    );
-END;
-GO
-
--- ============================================================
--- 5. NHA CUNG CAP VA NHAP KHO
--- ============================================================
-
-IF OBJECT_ID(N'dbo.suppliers', N'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.suppliers (
-        id INT IDENTITY(1,1) NOT NULL,
-        [name] NVARCHAR(255) NOT NULL,
-        phone NVARCHAR(20) NOT NULL,
-        email NVARCHAR(100) NULL,
-        [address] NVARCHAR(255) NULL,
-        CONSTRAINT PK_suppliers PRIMARY KEY (id)
-    );
-END;
-GO
-
-IF OBJECT_ID(N'dbo.import_orders', N'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.import_orders (
-        id BIGINT IDENTITY(1,1) NOT NULL,
-        supplier_id INT NOT NULL,
-        user_id BIGINT NOT NULL,             -- Nguoi lap phieu nhap
-        import_date DATETIME2(0) NOT NULL
-            CONSTRAINT DF_import_orders_date DEFAULT (SYSDATETIME()),
-        total_amount DECIMAL(15, 2) NOT NULL,
-        note NVARCHAR(MAX) NULL,
-        CONSTRAINT PK_import_orders PRIMARY KEY (id),
-        CONSTRAINT CK_import_orders_total CHECK (total_amount >= 0),
-        CONSTRAINT FK_import_orders_suppliers FOREIGN KEY (supplier_id)
-            REFERENCES dbo.suppliers(id) ON DELETE NO ACTION,
-        CONSTRAINT FK_import_orders_users FOREIGN KEY (user_id)
-            REFERENCES dbo.users(id) ON DELETE NO ACTION
-    );
-END;
-GO
-
-IF OBJECT_ID(N'dbo.import_order_details', N'U') IS NULL
-BEGIN
-    CREATE TABLE dbo.import_order_details (
-        id BIGINT IDENTITY(1,1) NOT NULL,
-        import_order_id BIGINT NOT NULL,
-        product_id BIGINT NOT NULL,
-        quantity INT NOT NULL,
-        import_price DECIMAL(15, 2) NOT NULL,
-        CONSTRAINT PK_import_order_details PRIMARY KEY (id),
-        CONSTRAINT CK_import_order_details_quantity CHECK (quantity > 0),
-        CONSTRAINT CK_import_order_details_price CHECK (import_price >= 0),
-        CONSTRAINT FK_import_order_details_import_orders FOREIGN KEY (import_order_id)
-            REFERENCES dbo.import_orders(id) ON DELETE CASCADE,
-        CONSTRAINT FK_import_order_details_products FOREIGN KEY (product_id)
-            REFERENCES dbo.products(id) ON DELETE NO ACTION
-    );
-END;
-GO
-
--- ============================================================
--- 6. CHI MUC PHUC VU TRUY VAN, LOC SAN PHAM VA DON HANG
--- ============================================================
-
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.user_roles') AND name = N'IX_user_roles_role_id')
-    CREATE INDEX IX_user_roles_role_id ON dbo.user_roles(role_id);
-GO
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.categories') AND name = N'IX_categories_parent_id')
-    CREATE INDEX IX_categories_parent_id ON dbo.categories(parent_id);
-GO
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.products') AND name = N'IX_products_category_type_price')
-    CREATE INDEX IX_products_category_type_price ON dbo.products(category_id, product_type, price);
-GO
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.product_attributes') AND name = N'IX_product_attributes_attribute_id')
-    CREATE INDEX IX_product_attributes_attribute_id ON dbo.product_attributes(attribute_id);
-GO
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.prebuilt_components') AND name = N'IX_prebuilt_components_component_id')
-    CREATE INDEX IX_prebuilt_components_component_id ON dbo.prebuilt_components(component_id);
-GO
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.orders') AND name = N'IX_orders_user_date')
-    CREATE INDEX IX_orders_user_date ON dbo.orders(user_id, order_date);
-GO
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.orders') AND name = N'IX_orders_status_date')
-    CREATE INDEX IX_orders_status_date ON dbo.orders([status], order_date);
-GO
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.order_details') AND name = N'IX_order_details_order_id')
-    CREATE INDEX IX_order_details_order_id ON dbo.order_details(order_id);
-GO
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.order_details') AND name = N'IX_order_details_product_id')
-    CREATE INDEX IX_order_details_product_id ON dbo.order_details(product_id);
-GO
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.import_orders') AND name = N'IX_import_orders_supplier_id')
-    CREATE INDEX IX_import_orders_supplier_id ON dbo.import_orders(supplier_id);
-GO
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.import_orders') AND name = N'IX_import_orders_user_id')
-    CREATE INDEX IX_import_orders_user_id ON dbo.import_orders(user_id);
-GO
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.import_order_details') AND name = N'IX_import_order_details_import_order_id')
-    CREATE INDEX IX_import_order_details_import_order_id ON dbo.import_order_details(import_order_id);
-GO
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.import_order_details') AND name = N'IX_import_order_details_product_id')
-    CREATE INDEX IX_import_order_details_product_id ON dbo.import_order_details(product_id);
-GO
-
--- ============================================================
--- 7. QUYEN MAC DINH (KHONG TAO TAI KHOAN / MAT KHAU ADMIN MAC DINH)
--- ============================================================
-
-IF NOT EXISTS (SELECT 1 FROM dbo.roles WHERE role_name = N'ROLE_ADMIN')
-    INSERT INTO dbo.roles(role_name) VALUES (N'ROLE_ADMIN');
-IF NOT EXISTS (SELECT 1 FROM dbo.roles WHERE role_name = N'ROLE_USER')
-    INSERT INTO dbo.roles(role_name) VALUES (N'ROLE_USER');
-GO
-
--- ============================================================
--- 8. KIEM TRA SAU KHI TAO DATABASE
--- ============================================================
-
-SELECT [name] AS table_name
-FROM sys.tables
-WHERE schema_id = SCHEMA_ID(N'dbo')
-ORDER BY [name];
-
-SELECT COUNT(*) AS total_tables
-FROM sys.tables
-WHERE schema_id = SCHEMA_ID(N'dbo');
-GO
-
-/*
-    GHI CHU NGHIEP VU:
-    1. File nay tao schema, constraints, indexes va 2 role; chua co tai khoan Admin.
-       Ung dung C# phai bam mat khau bang BCrypt / PasswordHasher truoc khi INSERT.
-    2. Chuc nang nhap kho (cong stock_quantity), duyet don (tru stock_quantity),
-       Build PC (kiem tra tuong thich) can duoc xu ly trong Service/Repository C#
-       voi SQL transaction; KHONG co trigger tu dong trong file nay.
-    3. Chuc nang bao hanh trong so do nghiep vu chua co bang trong SQL goc,
-       nen khong tu y them bang moi vao ban chuyen doi nay.
-*/

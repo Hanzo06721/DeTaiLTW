@@ -87,9 +87,17 @@ public class BuildPcController : Controller
             return RedirectToAction(nameof(Index));
         }
 
-        var bytes = _exportService.ExportPdf(model);
-        var fileName = $"BaoGia_PCStore_{DateTime.Now:yyyyMMdd_HHmm}.pdf";
-        return File(bytes, "application/pdf", fileName);
+        try
+        {
+            var bytes = _exportService.ExportPdf(model);
+            var fileName = $"BaoGia_PCStore_{DateTime.Now:yyyyMMdd_HHmm}.pdf";
+            return File(bytes, "application/pdf", fileName);
+        }
+        catch (Exception ex)
+        {
+            TempData["BuildPcError"] = $"Không thể xuất PDF: {ex.Message}";
+            return RedirectToAction(nameof(Index));
+        }
     }
 
     [HttpGet]
@@ -102,12 +110,20 @@ public class BuildPcController : Controller
             return RedirectToAction(nameof(Index));
         }
 
-        var bytes = _exportService.ExportExcel(model);
-        var fileName = $"BaoGia_PCStore_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
-        return File(
-            bytes,
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            fileName);
+        try
+        {
+            var bytes = _exportService.ExportExcel(model);
+            var fileName = $"BaoGia_PCStore_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
+            return File(
+                bytes,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                fileName);
+        }
+        catch (Exception ex)
+        {
+            TempData["BuildPcError"] = $"Không thể xuất Excel: {ex.Message}";
+            return RedirectToAction(nameof(Index));
+        }
     }
 
     [HttpPost]

@@ -14,6 +14,8 @@ public class BuildPcExportService : IBuildPcExportService
     static BuildPcExportService()
     {
         QuestPDF.Settings.License = LicenseType.Community;
+        QuestPDF.Settings.UseSystemFonts = true;
+        QuestPDF.Settings.ThrowOnMissingFontFamilies = false;
     }
 
     public byte[] ExportPdf(BuildPcPageViewModel model)
@@ -29,7 +31,7 @@ public class BuildPcExportService : IBuildPcExportService
                 page.Size(PageSizes.A4);
                 page.Margin(28);
                 page.PageColor(Colors.White);
-                page.DefaultTextStyle(x => x.FontFamily("Segoe UI").FontSize(9.5f).FontColor("#112F49"));
+                page.DefaultTextStyle(x => x.FontFamily("Arial").FontSize(9.5f).FontColor("#112F49"));
 
                 page.Header().Column(col =>
                 {
